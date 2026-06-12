@@ -24,6 +24,7 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setattr(
         sandbox, "git_identity", lambda: ("Jane Doe", "jane@example.com")
     )
+    monkeypatch.setattr(sandbox, "ensure_branch", lambda *args: None)
     return repo_path, worktree
 
 
@@ -67,6 +68,20 @@ class TestCreate:
             *sandbox.provision_commands("feat-x", "Jane Doe", "jane@example.com"),
             ["sbx", "run", "feat-x"],
         ]
+
+    def test_branch_is_based_on_target_before_sbx_create(self, repo, monkeypatch):
+        repo_path, _ = repo
+        events = []
+        monkeypatch.setattr(
+            sandbox, "ensure_branch", lambda *args: events.append(("ensure", args))
+        )
+        monkeypatch.setattr(
+            sandbox, "run", lambda command, check=True: events.append(("run", command))
+        )
+        result = runner.invoke(cli.app, ["create", "feat/x"])
+        assert result.exit_code == 0
+        assert events[0] == ("ensure", (str(repo_path), "feat/x", "main"))
+        assert events[1][0] == "run"  # sbx create only after the branch is based
 
     def test_post_create_runs_inside_sandbox_at_worktree(
         self, repo, recorded_runs, monkeypatch
@@ -127,6 +142,10 @@ class TestCreate:
 
 
 class TestMr:
+    @pytest.fixture(autouse=True)
+    def clean_worktree(self, monkeypatch):
+        monkeypatch.setattr(sandbox, "worktree_is_dirty", lambda worktree: False)
+
     def test_pushes_with_default_target(self, repo, recorded_runs):
         _, worktree = repo
         result = runner.invoke(cli.app, ["mr", "feat/x"])
@@ -143,6 +162,24 @@ class TestMr:
         monkeypatch.setattr(sandbox, "capture", lambda command: "")
         result = runner.invoke(cli.app, ["mr", "feat/x"])
         assert result.exit_code == 1
+
+    def test_dirty_worktree_prompts_and_declined_aborts(
+        self, repo, recorded_runs, monkeypatch
+    ):
+        monkeypatch.setattr(sandbox, "worktree_is_dirty", lambda worktree: True)
+        result = runner.invoke(cli.app, ["mr", "feat/x"], input="n\n")
+        assert result.exit_code == 1
+        assert "uncommitted changes" in result.output
+        assert recorded_runs == []
+
+    def test_dirty_worktree_prompts_and_accepted_pushes(
+        self, repo, recorded_runs, monkeypatch
+    ):
+        _, worktree = repo
+        monkeypatch.setattr(sandbox, "worktree_is_dirty", lambda worktree: True)
+        result = runner.invoke(cli.app, ["mr", "feat/x"], input="y\n")
+        assert result.exit_code == 0
+        assert recorded_runs == [sandbox.mr_push_command(worktree, "main")]
 
 
 class TestRm:

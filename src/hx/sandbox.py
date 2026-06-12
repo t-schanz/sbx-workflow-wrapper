@@ -61,6 +61,11 @@ def find_worktree(repo: str, branch: str) -> Path:
     return worktrees[branch]
 
 
+def worktree_is_dirty(worktree: Path) -> bool:
+    """True when the worktree has uncommitted changes (forgotten `git commit`)."""
+    return bool(capture(["git", "-C", str(worktree), "status", "--porcelain"]).strip())
+
+
 def mr_push_command(worktree: Path, target: str) -> list[str]:
     return [
         "git",
@@ -79,16 +84,35 @@ def mr_push_command(worktree: Path, target: str) -> list[str]:
     ]
 
 
+def branch_exists(repo: str, branch: str) -> bool:
+    return succeeds(["git", "-C", repo, "rev-parse", "--verify", "--quiet", branch])
+
+
+def ensure_branch(repo: str, branch: str, target: str) -> None:
+    """Create a missing branch at origin/<target>.
+
+    `git worktree add -b` (what `sbx create --branch` does) would fork from
+    whatever the main checkout happens to have checked out — basing explicitly
+    keeps feature branches off each other's commits. Existing branches are
+    reused as-is.
+    """
+    if branch_exists(repo, branch):
+        return
+    try:
+        run(["git", "-C", repo, "fetch", "origin", target])
+        base = f"origin/{target}"
+    except HxError:
+        base = target
+    run(["git", "-C", repo, "branch", branch, base])
+
+
 def unpushed_commit_count(repo: str, branch: str, base: str) -> int:
     """Commits on `branch` not on `base`, or 0 when deletion is safe.
 
     Safe means: the branch doesn't exist, or it has an upstream (its commits
     live on the remote already).
     """
-    branch_exists = succeeds(
-        ["git", "-C", repo, "rev-parse", "--verify", "--quiet", branch]
-    )
-    if not branch_exists:
+    if not branch_exists(repo, branch):
         return 0
     has_upstream = succeeds(
         [
@@ -124,6 +148,15 @@ path = pathlib.Path(sys.argv[1]).expanduser()
 if not path.exists():
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(sys.argv[2])
+"""
+
+MERGE_SETTINGS_SCRIPT = """\
+import json, pathlib, sys
+
+path = pathlib.Path.home() / ".claude" / "settings.json"
+settings = json.loads(path.read_text()) if path.exists() else {}
+settings.update(json.loads(sys.argv[1]))
+path.write_text(json.dumps(settings, indent=2) + "\\n")
 """
 
 
@@ -177,6 +210,14 @@ def provision_commands(
             WRITE_IF_MISSING_SCRIPT,
             "~/.claude/CLAUDE.md",
             SANDBOX_CLAUDE_MD,
+        ],
+        # commits from the sandbox should carry only the user's identity
+        [
+            *exec_prefix,
+            "python3",
+            "-c",
+            MERGE_SETTINGS_SCRIPT,
+            '{"includeCoAuthoredBy": false}',
         ],
         install_plugins_command(name),
     ]

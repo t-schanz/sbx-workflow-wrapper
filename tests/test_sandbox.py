@@ -166,6 +166,58 @@ class TestProvisionCommands:
         commands = sandbox.provision_commands("feat-x", "Jane Doe", "jane@example.com")
         assert commands[-1] == sandbox.install_plugins_command("feat-x")
 
+    def test_disables_co_authored_by_in_agent_settings(self):
+        commands = sandbox.provision_commands("feat-x", "Jane Doe", "jane@example.com")
+        merge_command = next(
+            c for c in commands if '{"includeCoAuthoredBy": false}' in c
+        )
+        assert merge_command[:5] == ["sbx", "exec", "feat-x", "--", "python3"]
+        script = merge_command[6]
+        assert "settings.json" in script
+        assert "update" in script
+
+
+class TestEnsureBranch:
+    def _record(self, monkeypatch, branch_exists, fetch_fails=False):
+        calls = []
+
+        def run(command, check=True):
+            calls.append(command)
+            if fetch_fails and "fetch" in command:
+                raise HxError("offline")
+
+        monkeypatch.setattr(sandbox, "run", run)
+        monkeypatch.setattr(sandbox, "succeeds", lambda command: branch_exists)
+        return calls
+
+    def test_existing_branch_is_left_alone(self, monkeypatch):
+        calls = self._record(monkeypatch, branch_exists=True)
+        sandbox.ensure_branch("/repo", "feat/x", "main")
+        assert calls == []
+
+    def test_missing_branch_is_created_from_origin_target(self, monkeypatch):
+        calls = self._record(monkeypatch, branch_exists=False)
+        sandbox.ensure_branch("/repo", "feat/x", "main")
+        assert calls == [
+            ["git", "-C", "/repo", "fetch", "origin", "main"],
+            ["git", "-C", "/repo", "branch", "feat/x", "origin/main"],
+        ]
+
+    def test_fetch_failure_falls_back_to_local_target(self, monkeypatch):
+        calls = self._record(monkeypatch, branch_exists=False, fetch_fails=True)
+        sandbox.ensure_branch("/repo", "feat/x", "main")
+        assert calls[-1] == ["git", "-C", "/repo", "branch", "feat/x", "main"]
+
+
+class TestWorktreeIsDirty:
+    def test_dirty_when_status_has_output(self, monkeypatch):
+        monkeypatch.setattr(sandbox, "capture", lambda command: " M ai/foo.py\n")
+        assert sandbox.worktree_is_dirty(Path("/wt")) is True
+
+    def test_clean_when_status_is_empty(self, monkeypatch):
+        monkeypatch.setattr(sandbox, "capture", lambda command: "")
+        assert sandbox.worktree_is_dirty(Path("/wt")) is False
+
 
 class TestGitIdentity:
     def test_reads_host_git_config(self, monkeypatch):

@@ -73,7 +73,9 @@ defaults — no hooks run.
 
 ### `hx create BRANCH [EXTRA_SBX_FLAGS...]`
 
-Creates a sandbox and a git worktree for `BRANCH`, provisions the sandbox (git
+Creates a sandbox and a git worktree for `BRANCH`. A branch that doesn't exist yet is
+created from `origin/<target>` (fetched first), so it never forks from whatever your
+main checkout happens to have checked out. Provisions the sandbox (git
 identity from the host, pre-commit, the superpowers claude plugin, workflow notes in
 the agent's CLAUDE.md), copies any configured `copy_files` into the worktree, runs the
 configured `post_create` command inside the sandbox, then attaches interactively.

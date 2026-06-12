@@ -48,6 +48,7 @@ def create(
     config = config_module.load_config()
     name = sandbox.sanitize_name(branch)
     git_user_name, git_user_email = sandbox.git_identity()
+    sandbox.ensure_branch(config.repo, branch, config.target)
 
     sandbox.run(
         [
@@ -119,6 +120,10 @@ def mr(
     """Push BRANCH from the host and auto-create a GitLab merge request."""
     config = config_module.load_config()
     worktree = sandbox.find_worktree(config.repo, branch)
+    if sandbox.worktree_is_dirty(worktree) and not typer.confirm(
+        f"worktree for {branch} has uncommitted changes — push anyway?"
+    ):
+        raise HxError("aborted — commit the changes in the sandbox first")
     sandbox.run(sandbox.mr_push_command(worktree, target or config.target))
 
 
