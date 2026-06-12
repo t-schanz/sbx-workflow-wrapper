@@ -109,11 +109,17 @@ def unpushed_commit_count(repo: str, branch: str, base: str) -> int:
     )
 
 
-def git_toplevel() -> str | None:
-    """Git root of the cwd, or None when not inside a repo."""
+def main_repo_root() -> str | None:
+    """Root of the main repository checkout for the cwd, or None outside a repo.
+
+    Resolves through worktrees: the common git dir belongs to the main checkout,
+    so per-project config matches no matter which worktree you run hx from.
+    """
     result = subprocess.run(
-        ["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True
+        ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+        capture_output=True,
+        text=True,
     )
     if result.returncode != 0:
         return None
-    return result.stdout.strip()
+    return str(Path(result.stdout.strip()).parent)

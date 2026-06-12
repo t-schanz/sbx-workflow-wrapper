@@ -29,17 +29,26 @@ path. Re-run with `--force` to overwrite an existing kit.
 Config keys (`~/.config/hx/config.toml`):
 
 ```toml
-repo = "/home/user/PycharmProjects/my-repo"  # required
+repo = "/home/user/PycharmProjects/my-repo"  # fallback when outside any git repo
 kit = "~/.config/sbx/kits/dev"               # default
 cpus = 4
 memory = "8g"
 target = "main"   # default MR target / base for the unpushed-commit check in `hx rm`
 ```
 
+### Which repo does hx operate on?
+
+hx resolves the **main repository checkout containing your cwd** — running from inside
+any worktree of a repo (including the `.sbx/...` worktrees hx creates) resolves to the
+main checkout, since they share a common git dir. Only outside any git repository does
+the top-level `repo` key apply as a fallback.
+
 ### Project-specific workflows
 
-Two optional config keys hook into `hx create`, so per-project setup lives in config,
-not code:
+Per-project settings live in `[projects."<main-checkout-path>"]` sections, merged over
+the top-level defaults when the path matches the resolved repo. Any key can be
+overridden per project; two optional keys hook into `hx create`, so per-project setup
+lives in config, not code:
 
 - **`copy_files`** — repo-relative paths copied from the main checkout into a fresh
   worktree (parent directories are created, missing files skipped silently). Use it to
@@ -54,9 +63,13 @@ spec that a slow gradle run produces. Copying the host's cached spec into the wo
 first lets `gen-sdk` skip gradle entirely:
 
 ```toml
+[projects."/home/user/PycharmProjects/my-monorepo"]
 copy_files = ["build/openapi/openapi.json"]
 post_create = "cd ai && uv sync --group dev --group tools && uv run make gen-sdk"
 ```
+
+Running `hx` from a repo without a `[projects]` section just uses the top-level
+defaults — no hooks run.
 
 ## Commands
 

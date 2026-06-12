@@ -16,8 +16,13 @@ def write_config(config_home, content):
     (config_dir / "config.toml").write_text(content)
 
 
+def in_repo(monkeypatch, repo_path):
+    monkeypatch.setattr(config_module, "main_repo_root", lambda: repo_path)
+
+
 class TestLoadConfig:
-    def test_loads_all_keys(self, config_home):
+    def test_loads_all_keys(self, config_home, monkeypatch):
+        in_repo(monkeypatch, None)
         write_config(
             config_home,
             'repo = "/repo"\nkit = "/kit"\ncpus = 8\nmemory = "16g"\ntarget = "dev"\n'
@@ -33,7 +38,8 @@ class TestLoadConfig:
         assert config.copy_files == ["build/openapi/openapi.json"]
         assert config.post_create == "make gen-sdk"
 
-    def test_defaults(self, config_home):
+    def test_defaults(self, config_home, monkeypatch):
+        in_repo(monkeypatch, None)
         write_config(config_home, 'repo = "/repo"\n')
         config = config_module.load_config()
         assert config.kit == "~/.config/sbx/kits/dev"
@@ -43,14 +49,65 @@ class TestLoadConfig:
         assert config.copy_files == []
         assert config.post_create is None
 
-    def test_missing_repo_falls_back_to_git_root(self, config_home, monkeypatch):
-        monkeypatch.setattr(config_module, "git_toplevel", lambda: "/cwd-repo")
-        config = config_module.load_config()
-        assert config.repo == "/cwd-repo"
+    def test_cwd_repo_wins_over_configured_repo(self, config_home, monkeypatch):
+        in_repo(monkeypatch, "/cwd-repo")
+        write_config(config_home, 'repo = "/other-repo"\n')
+        assert config_module.load_config().repo == "/cwd-repo"
 
     def test_missing_repo_outside_git_gives_helpful_error(
         self, config_home, monkeypatch
     ):
-        monkeypatch.setattr(config_module, "git_toplevel", lambda: None)
+        in_repo(monkeypatch, None)
+        write_config(config_home, "cpus = 8\n")
         with pytest.raises(HxError, match="hx setup"):
             config_module.load_config()
+
+
+PROJECTS_CONFIG = """\
+cpus = 8
+target = "main"
+
+[projects."/harpy"]
+target = "develop"
+copy_files = ["build/openapi/openapi.json"]
+post_create = "cd ai && make gen-sdk"
+"""
+
+
+class TestProjectSections:
+    def test_matching_project_overrides_defaults(self, config_home, monkeypatch):
+        in_repo(monkeypatch, "/harpy")
+        write_config(config_home, PROJECTS_CONFIG)
+        config = config_module.load_config()
+        assert config.repo == "/harpy"
+        assert config.target == "develop"
+        assert config.copy_files == ["build/openapi/openapi.json"]
+        assert config.post_create == "cd ai && make gen-sdk"
+        assert config.cpus == 8  # top-level defaults still apply
+
+    def test_other_repo_gets_no_project_hooks(self, config_home, monkeypatch):
+        in_repo(monkeypatch, "/some-other-repo")
+        write_config(config_home, PROJECTS_CONFIG)
+        config = config_module.load_config()
+        assert config.repo == "/some-other-repo"
+        assert config.target == "main"
+        assert config.copy_files == []
+        assert config.post_create is None
+
+    def test_project_key_paths_are_normalized(self, config_home, monkeypatch):
+        in_repo(monkeypatch, str(config_home / "harpy"))
+        write_config(
+            config_home,
+            f'[projects."{config_home}/../{config_home.name}/harpy/"]\n'
+            'post_create = "make gen-sdk"\n',
+        )
+        assert config_module.load_config().post_create == "make gen-sdk"
+
+    def test_fallback_repo_still_matches_its_project_section(
+        self, config_home, monkeypatch
+    ):
+        in_repo(monkeypatch, None)
+        write_config(config_home, 'repo = "/harpy"\n' + PROJECTS_CONFIG)
+        config = config_module.load_config()
+        assert config.repo == "/harpy"
+        assert config.post_create == "cd ai && make gen-sdk"

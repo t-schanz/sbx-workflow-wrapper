@@ -7,7 +7,7 @@ import typer
 
 from hx import HxError
 from hx import config as config_module
-from hx.sandbox import git_toplevel
+from hx.sandbox import main_repo_root
 
 
 def render_kit(name: str, email: str) -> str:
@@ -46,7 +46,7 @@ def run_setup(force: bool) -> None:
     write_kit(kit_dir, render_kit(name, email), force=force)
     typer.echo(f"wrote kit to {kit_dir / 'spec.yaml'}")
 
-    default_repo = git_toplevel() or ""
+    default_repo = main_repo_root() or ""
     repo = typer.prompt("repo path", default=default_repo or None)
     config_file = config_module.config_path()
     config_file.parent.mkdir(parents=True, exist_ok=True)

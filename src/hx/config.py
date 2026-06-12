@@ -7,7 +7,7 @@ from pathlib import Path
 from pydantic import BaseModel
 
 from hx import HxError
-from hx.sandbox import git_toplevel
+from hx.sandbox import main_repo_root
 
 
 class Config(BaseModel):
@@ -27,14 +27,31 @@ def config_path() -> Path:
     return config_home / "hx" / "config.toml"
 
 
+def normalize(path: str) -> str:
+    return str(Path(path).expanduser().resolve())
+
+
 def load_config() -> Config:
+    """Resolve the effective config for the repo hx is operating on.
+
+    The repo is the main checkout containing the cwd (worktrees resolve to their
+    main checkout), falling back to the top-level `repo` key outside any git repo.
+    A matching `[projects."<repo-path>"]` section overrides the top-level keys.
+    """
     path = config_path()
     data = tomllib.loads(path.read_text()) if path.exists() else {}
-    if "repo" not in data:
-        repo = git_toplevel()
-        if repo is None:
-            raise HxError(
-                "no repo configured and not inside a git repository — run `hx setup`"
-            )
-        data["repo"] = repo
+    projects = data.pop("projects", {})
+
+    repo = main_repo_root() or data.get("repo")
+    if not repo:
+        raise HxError(
+            "no repo configured and not inside a git repository — run `hx setup`"
+        )
+    repo = normalize(repo)
+
+    for project_path, overrides in projects.items():
+        if normalize(project_path) == repo:
+            data.update(overrides)
+            break
+    data["repo"] = repo
     return Config(**data)
