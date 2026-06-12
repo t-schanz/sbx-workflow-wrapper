@@ -12,10 +12,14 @@ from hx.sandbox import git_toplevel
 
 class Config(BaseModel):
     repo: str
-    kit: str = "~/.config/sbx/kits/harpy-dev"
+    kit: str = "~/.config/sbx/kits/dev"
     cpus: int = 4
     memory: str = "8g"
     target: str = "main"
+    # Repo-relative paths copied into a fresh worktree (e.g. cached build artifacts).
+    copy_files: list[str] = []
+    # Shell command run inside the sandbox at the worktree root after create.
+    post_create: str | None = None
 
 
 def config_path() -> Path:

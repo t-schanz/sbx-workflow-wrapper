@@ -1,4 +1,4 @@
-"""HARPY sandbox workflow CLI."""
+"""Sandbox workflow CLI."""
 
 
 class HxError(Exception):

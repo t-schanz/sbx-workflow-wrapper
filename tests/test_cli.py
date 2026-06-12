@@ -26,6 +26,11 @@ def repo(tmp_path, monkeypatch):
     return repo_path, worktree
 
 
+def configure(monkeypatch, repo_path, **overrides):
+    config = Config(repo=str(repo_path), **overrides)
+    monkeypatch.setattr(config_module, "load_config", lambda: config)
+
+
 @pytest.fixture
 def recorded_runs(monkeypatch):
     calls = []
@@ -42,23 +47,34 @@ class TestCreate:
         repo_path, worktree = repo
         result = runner.invoke(cli.app, ["create", "feat/x", "--", "--gpu"])
         assert result.exit_code == 0
-        assert recorded_runs[0] == [
-            "sbx",
-            "create",
-            "--branch",
-            "feat/x",
-            "--name",
-            "feat-x",
-            "--cpus",
-            "4",
-            "--memory",
-            "8g",
-            "--kit",
-            str(Path("~/.config/sbx/kits/harpy-dev").expanduser()),
-            "claude",
-            str(repo_path),
-            "--gpu",
+        assert recorded_runs == [
+            [
+                "sbx",
+                "create",
+                "--branch",
+                "feat/x",
+                "--name",
+                "feat-x",
+                "--cpus",
+                "4",
+                "--memory",
+                "8g",
+                "--kit",
+                str(Path("~/.config/sbx/kits/dev").expanduser()),
+                "claude",
+                str(repo_path),
+                "--gpu",
+            ],
+            ["sbx", "run", "feat-x"],
         ]
+
+    def test_post_create_runs_inside_sandbox_at_worktree(
+        self, repo, recorded_runs, monkeypatch
+    ):
+        repo_path, worktree = repo
+        configure(monkeypatch, repo_path, post_create="make gen-sdk")
+        result = runner.invoke(cli.app, ["create", "feat/x"])
+        assert result.exit_code == 0
         assert recorded_runs[1] == [
             "sbx",
             "exec",
@@ -66,13 +82,13 @@ class TestCreate:
             "--",
             "sh",
             "-c",
-            f"cd '{worktree}/ai' && uv sync --group dev --group tools"
-            " && uv run make gen-sdk",
+            f"cd '{worktree}' && make gen-sdk",
         ]
         assert recorded_runs[2] == ["sbx", "run", "feat-x"]
 
-    def test_copies_openapi_spec_when_present(self, repo, recorded_runs):
+    def test_copy_files_primes_the_worktree(self, repo, recorded_runs, monkeypatch):
         repo_path, worktree = repo
+        configure(monkeypatch, repo_path, copy_files=["build/openapi/openapi.json"])
         source = repo_path / "build" / "openapi" / "openapi.json"
         source.parent.mkdir(parents=True)
         source.write_text('{"openapi": "3.1.0"}')
@@ -81,7 +97,16 @@ class TestCreate:
         copied = worktree / "build" / "openapi" / "openapi.json"
         assert copied.read_text() == '{"openapi": "3.1.0"}'
 
-    def test_sdk_failure_warns_but_continues(self, repo, monkeypatch):
+    def test_missing_copy_files_are_skipped(self, repo, recorded_runs, monkeypatch):
+        repo_path, worktree = repo
+        configure(monkeypatch, repo_path, copy_files=["does/not/exist.json"])
+        result = runner.invoke(cli.app, ["create", "feat/x"])
+        assert result.exit_code == 0
+        assert not (worktree / "does").exists()
+
+    def test_post_create_failure_warns_but_continues(self, repo, monkeypatch):
+        repo_path, _ = repo
+        configure(monkeypatch, repo_path, post_create="make gen-sdk")
         calls = []
 
         def run(command, check=True):
@@ -92,7 +117,7 @@ class TestCreate:
         monkeypatch.setattr(sandbox, "run", run)
         result = runner.invoke(cli.app, ["create", "feat/x"])
         assert result.exit_code == 0
-        assert "SDK setup failed" in result.output
+        assert "post-create setup failed" in result.output
         assert calls[-1] == ["sbx", "run", "feat-x"]
 
     def test_missing_worktree_is_an_error(self, repo, recorded_runs, monkeypatch):

@@ -15,24 +15,24 @@ class TestRenderKit:
     def test_keeps_kit_structure(self):
         rendered = setup_cmd.render_kit("Jane Doe", "jane@example.com")
         assert 'schemaVersion: "1"' in rendered
-        assert "name: harpy-dev" in rendered
+        assert "name: dev" in rendered
 
 
 class TestWriteKit:
     def test_writes_spec_yaml(self, tmp_path):
-        kit_dir = tmp_path / "kits" / "harpy-dev"
+        kit_dir = tmp_path / "kits" / "dev"
         setup_cmd.write_kit(kit_dir, "content", force=False)
         assert (kit_dir / "spec.yaml").read_text() == "content"
 
     def test_refuses_overwrite_without_force(self, tmp_path):
-        kit_dir = tmp_path / "kits" / "harpy-dev"
+        kit_dir = tmp_path / "kits" / "dev"
         setup_cmd.write_kit(kit_dir, "old", force=False)
         with pytest.raises(HxError, match="--force"):
             setup_cmd.write_kit(kit_dir, "new", force=False)
         assert (kit_dir / "spec.yaml").read_text() == "old"
 
     def test_overwrites_with_force(self, tmp_path):
-        kit_dir = tmp_path / "kits" / "harpy-dev"
+        kit_dir = tmp_path / "kits" / "dev"
         setup_cmd.write_kit(kit_dir, "old", force=False)
         setup_cmd.write_kit(kit_dir, "new", force=True)
         assert (kit_dir / "spec.yaml").read_text() == "new"

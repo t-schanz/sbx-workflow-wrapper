@@ -42,12 +42,12 @@ def git_identity() -> tuple[str, str]:
 def run_setup(force: bool) -> None:
     name, email = git_identity()
 
-    kit_dir = Path("~/.config/sbx/kits/harpy-dev").expanduser()
+    kit_dir = Path("~/.config/sbx/kits/dev").expanduser()
     write_kit(kit_dir, render_kit(name, email), force=force)
     typer.echo(f"wrote kit to {kit_dir / 'spec.yaml'}")
 
     default_repo = git_toplevel() or ""
-    repo = typer.prompt("HARPY repo path", default=default_repo or None)
+    repo = typer.prompt("repo path", default=default_repo or None)
     config_file = config_module.config_path()
     config_file.parent.mkdir(parents=True, exist_ok=True)
     config_file.write_text(f'repo = "{Path(repo).expanduser()}"\n')

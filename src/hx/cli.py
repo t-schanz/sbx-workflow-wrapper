@@ -12,7 +12,7 @@ from hx import config as config_module
 from hx import sandbox, setup_cmd
 
 app = typer.Typer(
-    help="HARPY sandbox workflow: one Docker sandbox + git worktree per feature branch.",
+    help="Sandbox workflow: one Docker sandbox + git worktree per feature branch.",
     no_args_is_help=True,
 )
 
@@ -41,7 +41,7 @@ def create(
         str, typer.Argument(help="Feature branch to create the sandbox for.")
     ],
 ) -> None:
-    """Create a sandbox + worktree for BRANCH, set up the SDK, then attach.
+    """Create a sandbox + worktree for BRANCH, run the configured setup, then attach.
 
     Extra flags after BRANCH are passed through verbatim to `sbx create`.
     """
@@ -70,28 +70,29 @@ def create(
 
     worktree = sandbox.find_worktree(config.repo, branch)
 
-    openapi_spec = Path(config.repo) / "build" / "openapi" / "openapi.json"
-    if openapi_spec.exists():
-        destination = worktree / "build" / "openapi" / "openapi.json"
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy(openapi_spec, destination)
+    for relative_path in config.copy_files:
+        source = Path(config.repo) / relative_path
+        if source.exists():
+            destination = worktree / relative_path
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy(source, destination)
 
-    typer.echo("setting up the Python SDK inside the sandbox...")
-    try:
-        sandbox.run(
-            [
-                "sbx",
-                "exec",
-                name,
-                "--",
-                "sh",
-                "-c",
-                f"cd '{worktree}/ai' && uv sync --group dev --group tools"
-                " && uv run make gen-sdk",
-            ]
-        )
-    except HxError:
-        typer.echo("SDK setup failed — run it manually inside the sandbox")
+    if config.post_create:
+        typer.echo("running post-create setup inside the sandbox...")
+        try:
+            sandbox.run(
+                [
+                    "sbx",
+                    "exec",
+                    name,
+                    "--",
+                    "sh",
+                    "-c",
+                    f"cd '{worktree}' && {config.post_create}",
+                ]
+            )
+        except HxError:
+            typer.echo("post-create setup failed — run it manually inside the sandbox")
 
     sandbox.run(["sbx", "run", name], check=False)
 

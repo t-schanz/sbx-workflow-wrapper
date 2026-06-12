@@ -20,7 +20,9 @@ class TestLoadConfig:
     def test_loads_all_keys(self, config_home):
         write_config(
             config_home,
-            'repo = "/repo"\nkit = "/kit"\ncpus = 8\nmemory = "16g"\ntarget = "dev"\n',
+            'repo = "/repo"\nkit = "/kit"\ncpus = 8\nmemory = "16g"\ntarget = "dev"\n'
+            'copy_files = ["build/openapi/openapi.json"]\n'
+            'post_create = "make gen-sdk"\n',
         )
         config = config_module.load_config()
         assert config.repo == "/repo"
@@ -28,14 +30,18 @@ class TestLoadConfig:
         assert config.cpus == 8
         assert config.memory == "16g"
         assert config.target == "dev"
+        assert config.copy_files == ["build/openapi/openapi.json"]
+        assert config.post_create == "make gen-sdk"
 
     def test_defaults(self, config_home):
         write_config(config_home, 'repo = "/repo"\n')
         config = config_module.load_config()
-        assert config.kit == "~/.config/sbx/kits/harpy-dev"
+        assert config.kit == "~/.config/sbx/kits/dev"
         assert config.cpus == 4
         assert config.memory == "8g"
         assert config.target == "main"
+        assert config.copy_files == []
+        assert config.post_create is None
 
     def test_missing_repo_falls_back_to_git_root(self, config_home, monkeypatch):
         monkeypatch.setattr(config_module, "git_toplevel", lambda: "/cwd-repo")
