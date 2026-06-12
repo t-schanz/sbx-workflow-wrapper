@@ -98,6 +98,87 @@ class TestMrPushCommand:
         assert "merge_request.target=develop" in command
 
 
+class TestInstallPluginsCommand:
+    def test_installs_superpowers_via_exec_after_create(self):
+        command = sandbox.install_plugins_command("feat-x")
+        assert command == [
+            "sbx",
+            "exec",
+            "feat-x",
+            "--",
+            "sh",
+            "-c",
+            "claude plugin marketplace add anthropics/claude-plugins-official"
+            " 2>/dev/null;"
+            " claude plugin install superpowers@claude-plugins-official",
+        ]
+
+
+class TestProvisionCommands:
+    def test_sets_git_identity_via_exec(self):
+        commands = sandbox.provision_commands("feat-x", "Jane Doe", "jane@example.com")
+        assert [
+            "sbx",
+            "exec",
+            "feat-x",
+            "--",
+            "git",
+            "config",
+            "--global",
+            "user.name",
+            "Jane Doe",
+        ] in commands
+        assert [
+            "sbx",
+            "exec",
+            "feat-x",
+            "--",
+            "git",
+            "config",
+            "--global",
+            "user.email",
+            "jane@example.com",
+        ] in commands
+
+    def test_installs_pre_commit(self):
+        commands = sandbox.provision_commands("feat-x", "Jane Doe", "jane@example.com")
+        assert [
+            "sbx",
+            "exec",
+            "feat-x",
+            "--",
+            "uv",
+            "tool",
+            "install",
+            "pre-commit",
+        ] in commands
+
+    def test_writes_claude_md_only_if_missing(self):
+        commands = sandbox.provision_commands("feat-x", "Jane Doe", "jane@example.com")
+        write_command = next(c for c in commands if sandbox.SANDBOX_CLAUDE_MD in c)
+        assert write_command[:5] == ["sbx", "exec", "feat-x", "--", "python3"]
+        script = write_command[6]
+        assert "exists" in script
+        assert "Sandbox workflow" in sandbox.SANDBOX_CLAUDE_MD
+        assert "hxmr <branch>" in sandbox.SANDBOX_CLAUDE_MD
+
+    def test_ends_with_plugin_install(self):
+        commands = sandbox.provision_commands("feat-x", "Jane Doe", "jane@example.com")
+        assert commands[-1] == sandbox.install_plugins_command("feat-x")
+
+
+class TestGitIdentity:
+    def test_reads_host_git_config(self, monkeypatch):
+        values = {"user.name": "Jane Doe\n", "user.email": "jane@example.com\n"}
+        monkeypatch.setattr(sandbox, "capture", lambda command: values[command[-1]])
+        assert sandbox.git_identity() == ("Jane Doe", "jane@example.com")
+
+    def test_unset_identity_is_an_error(self, monkeypatch):
+        monkeypatch.setattr(sandbox, "capture", lambda command: "")
+        with pytest.raises(HxError, match="user.name"):
+            sandbox.git_identity()
+
+
 class FakeGit:
     """Simulates the three git queries the rm guard makes."""
 

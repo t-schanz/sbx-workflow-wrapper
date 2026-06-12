@@ -47,6 +47,7 @@ def create(
     """
     config = config_module.load_config()
     name = sandbox.sanitize_name(branch)
+    git_user_name, git_user_email = sandbox.git_identity()
 
     sandbox.run(
         [
@@ -60,13 +61,20 @@ def create(
             str(config.cpus),
             "--memory",
             config.memory,
-            "--kit",
-            str(Path(config.kit).expanduser()),
             "claude",
             config.repo,
             *context.args,
         ]
     )
+
+    typer.echo("provisioning the sandbox (git identity, pre-commit, claude plugins)...")
+    for provision_command in sandbox.provision_commands(
+        name, git_user_name, git_user_email
+    ):
+        try:
+            sandbox.run(provision_command)
+        except HxError as error:
+            typer.echo(f"provisioning step failed (continuing): {error}")
 
     worktree = sandbox.find_worktree(config.repo, branch)
 
@@ -133,13 +141,9 @@ def rm(
 
 @app.command()
 @handle_errors
-def setup(
-    force: Annotated[
-        bool, typer.Option("--force", help="Overwrite an existing kit.")
-    ] = False,
-) -> None:
-    """Install the bundled sbx kit and write the hx config (first-run bootstrap)."""
-    setup_cmd.run_setup(force=force)
+def setup() -> None:
+    """Write the hx config (first-run bootstrap); existing config is left unchanged."""
+    setup_cmd.run_setup()
 
 
 def main() -> None:

@@ -1,5 +1,3 @@
-from pathlib import Path
-
 import pytest
 from typer.testing import CliRunner
 
@@ -23,6 +21,9 @@ def repo(tmp_path, monkeypatch):
         f"worktree {worktree}\nHEAD 2222\nbranch refs/heads/feat/x\n"
     )
     monkeypatch.setattr(sandbox, "capture", lambda command: porcelain)
+    monkeypatch.setattr(
+        sandbox, "git_identity", lambda: ("Jane Doe", "jane@example.com")
+    )
     return repo_path, worktree
 
 
@@ -59,12 +60,11 @@ class TestCreate:
                 "4",
                 "--memory",
                 "8g",
-                "--kit",
-                str(Path("~/.config/sbx/kits/dev").expanduser()),
                 "claude",
                 str(repo_path),
                 "--gpu",
             ],
+            *sandbox.provision_commands("feat-x", "Jane Doe", "jane@example.com"),
             ["sbx", "run", "feat-x"],
         ]
 
@@ -75,7 +75,7 @@ class TestCreate:
         configure(monkeypatch, repo_path, post_create="make gen-sdk")
         result = runner.invoke(cli.app, ["create", "feat/x"])
         assert result.exit_code == 0
-        assert recorded_runs[1] == [
+        assert recorded_runs[-2] == [
             "sbx",
             "exec",
             "feat-x",
@@ -84,7 +84,7 @@ class TestCreate:
             "-c",
             f"cd '{worktree}' && make gen-sdk",
         ]
-        assert recorded_runs[2] == ["sbx", "run", "feat-x"]
+        assert recorded_runs[-1] == ["sbx", "run", "feat-x"]
 
     def test_copy_files_primes_the_worktree(self, repo, recorded_runs, monkeypatch):
         repo_path, worktree = repo
@@ -111,7 +111,7 @@ class TestCreate:
 
         def run(command, check=True):
             calls.append(command)
-            if command[0] == "sbx" and command[1] == "exec":
+            if "make gen-sdk" in command[-1]:
                 raise cli.HxError("boom")
 
         monkeypatch.setattr(sandbox, "run", run)

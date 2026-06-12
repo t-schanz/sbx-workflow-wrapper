@@ -12,7 +12,6 @@ from hx.sandbox import main_repo_root
 
 class Config(BaseModel):
     repo: str
-    kit: str = "~/.config/sbx/kits/dev"
     cpus: int = 4
     memory: str = "8g"
     target: str = "main"

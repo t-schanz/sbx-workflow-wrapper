@@ -109,6 +109,79 @@ def unpushed_commit_count(repo: str, branch: str, base: str) -> int:
     )
 
 
+SANDBOX_CLAUDE_MD = """\
+## Sandbox workflow
+You run inside a Docker sandbox on a dedicated git worktree (branch = sandbox name).
+Work only inside this worktree, never in the main repo checkout next to it.
+git commit works here. git push does NOT - the sandbox has no git credentials by design.
+To push and open a merge request, ask the user to run on the host: hxmr <branch>
+"""
+
+WRITE_IF_MISSING_SCRIPT = """\
+import pathlib, sys
+
+path = pathlib.Path(sys.argv[1]).expanduser()
+if not path.exists():
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(sys.argv[2])
+"""
+
+
+def git_identity() -> tuple[str, str]:
+    name = capture(["git", "config", "user.name"]).strip()
+    email = capture(["git", "config", "user.email"]).strip()
+    if not name or not email:
+        raise HxError(
+            "git user.name / user.email are unset — configure them first "
+            "(git config --global user.name ...)"
+        )
+    return name, email
+
+
+def install_plugins_command(name: str) -> list[str]:
+    return [
+        "sbx",
+        "exec",
+        name,
+        "--",
+        "sh",
+        "-c",
+        "claude plugin marketplace add anthropics/claude-plugins-official"
+        " 2>/dev/null;"
+        " claude plugin install superpowers@claude-plugins-official",
+    ]
+
+
+def provision_commands(
+    name: str, git_user_name: str, git_user_email: str
+) -> list[list[str]]:
+    """Sandbox setup via exec AFTER `sbx create` — deliberately NOT an sbx kit.
+
+    Kits break sbx's provisioning (sbx 0.30): any --kit skips the credential
+    seeding (login prompt in every sandbox), and kit commands that run the
+    claude CLI additionally get their plugin enablement clobbered by sbx's
+    later settings write.
+    """
+    exec_prefix = ["sbx", "exec", name, "--"]
+    return [
+        # git identity (sbx forwarding is unreliable)
+        [*exec_prefix, "git", "config", "--global", "user.name", git_user_name],
+        [*exec_prefix, "git", "config", "--global", "user.email", git_user_email],
+        # pre-commit binary (repo git hooks call it)
+        [*exec_prefix, "uv", "tool", "install", "pre-commit"],
+        # workflow notes for the agent
+        [
+            *exec_prefix,
+            "python3",
+            "-c",
+            WRITE_IF_MISSING_SCRIPT,
+            "~/.claude/CLAUDE.md",
+            SANDBOX_CLAUDE_MD,
+        ],
+        install_plugins_command(name),
+    ]
+
+
 def main_repo_root() -> str | None:
     """Root of the main repository checkout for the cwd, or None outside a repo.
 

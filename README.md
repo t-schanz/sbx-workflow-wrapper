@@ -22,15 +22,13 @@ This exposes three commands: `hx`, plus `hxmr` and `hxrm` as muscle-memory alias
 hx setup
 ```
 
-This installs the bundled `dev` sbx kit to `~/.config/sbx/kits/dev` (templated with
-your host git identity) and writes `~/.config/hx/config.toml`, prompting for the repo
-path. Re-run with `--force` to overwrite an existing kit.
+This writes `~/.config/hx/config.toml`, prompting for the repo path (an existing config
+is left unchanged).
 
 Config keys (`~/.config/hx/config.toml`):
 
 ```toml
 repo = "/home/user/PycharmProjects/my-repo"  # fallback when outside any git repo
-kit = "~/.config/sbx/kits/dev"               # default
 cpus = 4
 memory = "8g"
 target = "main"   # default MR target / base for the unpushed-commit check in `hx rm`
@@ -75,9 +73,15 @@ defaults — no hooks run.
 
 ### `hx create BRANCH [EXTRA_SBX_FLAGS...]`
 
-Creates a sandbox and a git worktree for `BRANCH`, copies any configured `copy_files`
-into the worktree, runs the configured `post_create` command inside the sandbox, then
-attaches interactively.
+Creates a sandbox and a git worktree for `BRANCH`, provisions the sandbox (git
+identity from the host, pre-commit, the superpowers claude plugin, workflow notes in
+the agent's CLAUDE.md), copies any configured `copy_files` into the worktree, runs the
+configured `post_create` command inside the sandbox, then attaches interactively.
+
+Provisioning deliberately happens via `sbx exec` after creation, **not** via an sbx
+kit: as of sbx 0.30, passing any `--kit` skips the Claude credential seeding (you'd
+get a login prompt in every sandbox), and kit commands that run the claude CLI get
+their plugin enablement clobbered by sbx's later settings write.
 
 ```sh
 hx create feat/PROJ-123-shiny-thing

@@ -25,13 +25,12 @@ class TestLoadConfig:
         in_repo(monkeypatch, None)
         write_config(
             config_home,
-            'repo = "/repo"\nkit = "/kit"\ncpus = 8\nmemory = "16g"\ntarget = "dev"\n'
+            'repo = "/repo"\ncpus = 8\nmemory = "16g"\ntarget = "dev"\n'
             'copy_files = ["build/openapi/openapi.json"]\n'
             'post_create = "make gen-sdk"\n',
         )
         config = config_module.load_config()
         assert config.repo == "/repo"
-        assert config.kit == "/kit"
         assert config.cpus == 8
         assert config.memory == "16g"
         assert config.target == "dev"
@@ -42,7 +41,6 @@ class TestLoadConfig:
         in_repo(monkeypatch, None)
         write_config(config_home, 'repo = "/repo"\n')
         config = config_module.load_config()
-        assert config.kit == "~/.config/sbx/kits/dev"
         assert config.cpus == 4
         assert config.memory == "8g"
         assert config.target == "main"
