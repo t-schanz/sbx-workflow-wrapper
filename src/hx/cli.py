@@ -147,14 +147,21 @@ def rm(
         str, typer.Argument(help="Feature branch whose sandbox to remove.")
     ],
 ) -> None:
-    """Remove the sandbox, its worktree, and the branch (prompts if work would be lost)."""
+    """Remove the sandbox and its host remote (prompts if unpushed work would be lost).
+
+    Fetches first so the commits are mirrored into refs/sandboxes/<name>/* (which
+    survive removal) before anything is deleted.
+    """
     config = config_module.load_config()
-    unpushed = sandbox.unpushed_commit_count(config.repo, branch, config.target)
+    name = sandbox.sanitize_name(branch)
+    sandbox.fetch_sandbox(config.repo, name, check=False)
+    unpushed = sandbox.unpushed_commit_count(config.repo, name, branch, config.target)
     if unpushed > 0 and not typer.confirm(
         f"branch {branch} has {unpushed} unpushed commit(s) — delete anyway?"
     ):
         raise HxError("aborted")
-    sandbox.run(["sbx", "rm", "--force", sandbox.sanitize_name(branch)])
+    sandbox.run(["sbx", "rm", "--force", name])
+    sandbox.remove_sandbox_remote(config.repo, name)
 
 
 @app.command()

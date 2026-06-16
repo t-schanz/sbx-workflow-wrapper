@@ -204,30 +204,40 @@ class TestMr:
 
 class TestRm:
     def test_safe_branch_removed_without_prompt(self, repo, recorded_runs, monkeypatch):
+        repo_path = repo
         monkeypatch.setattr(
-            sandbox, "unpushed_commit_count", lambda repo, branch, base: 0
+            sandbox, "unpushed_commit_count", lambda repo, name, branch, target: 0
         )
         result = runner.invoke(cli.app, ["rm", "feat/x"])
         assert result.exit_code == 0
-        assert recorded_runs == [["sbx", "rm", "--force", "feat-x"]]
+        assert recorded_runs == [
+            ["git", "-C", str(repo_path), "fetch", "sandbox-feat-x"],
+            ["sbx", "rm", "--force", "feat-x"],
+            ["git", "-C", str(repo_path), "remote", "remove", "sandbox-feat-x"],
+        ]
 
     def test_unpushed_commits_prompt_declined_aborts(
         self, repo, recorded_runs, monkeypatch
     ):
         monkeypatch.setattr(
-            sandbox, "unpushed_commit_count", lambda repo, branch, base: 3
+            sandbox, "unpushed_commit_count", lambda repo, name, branch, target: 3
         )
         result = runner.invoke(cli.app, ["rm", "feat/x"], input="n\n")
         assert result.exit_code == 1
-        assert recorded_runs == []
+        # the preserving fetch still ran, but nothing was removed
+        assert ["sbx", "rm", "--force", "feat-x"] not in recorded_runs
 
     def test_unpushed_commits_prompt_accepted_removes(
         self, repo, recorded_runs, monkeypatch
     ):
+        repo_path = repo
         monkeypatch.setattr(
-            sandbox, "unpushed_commit_count", lambda repo, branch, base: 3
+            sandbox, "unpushed_commit_count", lambda repo, name, branch, target: 3
         )
         result = runner.invoke(cli.app, ["rm", "feat/x"], input="y\n")
         assert result.exit_code == 0
         assert "3 unpushed commit(s)" in result.output
-        assert recorded_runs == [["sbx", "rm", "--force", "feat-x"]]
+        assert recorded_runs[-2:] == [
+            ["sbx", "rm", "--force", "feat-x"],
+            ["git", "-C", str(repo_path), "remote", "remove", "sandbox-feat-x"],
+        ]
