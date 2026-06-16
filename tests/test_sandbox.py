@@ -163,23 +163,27 @@ class TestGitIdentity:
 
 
 class FakeGit:
-    """Simulates the three git queries the rm guard makes."""
+    """Simulates the git ref queries the rm guard makes against the sandbox ref."""
 
-    def __init__(self, branch_exists, has_upstream, unpushed_count):
-        self.branch_exists = branch_exists
-        self.has_upstream = has_upstream
-        self.unpushed_count = unpushed_count
+    def __init__(self, sandbox_ref_exists, origin_branch_exists, is_ancestor, count):
+        self.sandbox_ref_exists = sandbox_ref_exists
+        self.origin_branch_exists = origin_branch_exists
+        self.is_ancestor = is_ancestor
+        self.count = count
 
     def capture(self, command):
         if "rev-list" in command:
-            return f"{self.unpushed_count}\n"
+            return f"{self.count}\n"
         raise AssertionError(f"unexpected capture: {command}")
 
     def succeeds(self, command):
-        if "@{upstream}" in command[-1]:
-            return self.has_upstream
-        if "--verify" in command:
-            return self.branch_exists
+        if "merge-base" in command:
+            return self.is_ancestor
+        target = command[-1]
+        if target.startswith("refs/sandboxes/"):
+            return self.sandbox_ref_exists
+        if target.startswith("origin/"):
+            return self.origin_branch_exists
         raise AssertionError(f"unexpected probe: {command}")
 
 
@@ -189,21 +193,34 @@ def _patch_git(monkeypatch, fake):
 
 
 class TestUnpushedCommitCount:
-    def test_branch_missing_is_safe(self, monkeypatch):
-        _patch_git(monkeypatch, FakeGit(False, False, 5))
-        assert sandbox.unpushed_commit_count("/repo", "feat/x", "main") == 0
+    def test_no_fetched_ref_is_safe(self, monkeypatch):
+        _patch_git(monkeypatch, FakeGit(False, False, False, 5))
+        assert sandbox.unpushed_commit_count("/repo", "feat-x", "feat/x", "main") == 0
 
-    def test_branch_with_upstream_is_safe(self, monkeypatch):
-        _patch_git(monkeypatch, FakeGit(True, True, 5))
-        assert sandbox.unpushed_commit_count("/repo", "feat/x", "main") == 0
+    def test_already_pushed_branch_is_safe(self, monkeypatch):
+        # origin/<branch> exists and the sandbox tip is an ancestor of it
+        _patch_git(monkeypatch, FakeGit(True, True, True, 5))
+        assert sandbox.unpushed_commit_count("/repo", "feat-x", "feat/x", "main") == 0
 
-    def test_no_upstream_zero_commits(self, monkeypatch):
-        _patch_git(monkeypatch, FakeGit(True, False, 0))
-        assert sandbox.unpushed_commit_count("/repo", "feat/x", "main") == 0
+    def test_origin_branch_ahead_counts_against_origin_branch(self, monkeypatch):
+        _patch_git(monkeypatch, FakeGit(True, True, False, 2))
+        assert sandbox.unpushed_commit_count("/repo", "feat-x", "feat/x", "main") == 2
 
-    def test_no_upstream_with_commits(self, monkeypatch):
-        _patch_git(monkeypatch, FakeGit(True, False, 3))
-        assert sandbox.unpushed_commit_count("/repo", "feat/x", "main") == 3
+    def test_no_origin_branch_counts_against_target(self, monkeypatch):
+        _patch_git(monkeypatch, FakeGit(True, False, False, 4))
+        assert sandbox.unpushed_commit_count("/repo", "feat-x", "feat/x", "main") == 4
+
+
+class TestRemoveSandboxRemote:
+    def test_removes_remote_best_effort(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            sandbox, "run", lambda command, check=True: calls.append((command, check))
+        )
+        sandbox.remove_sandbox_remote("/repo", "feat-x")
+        assert calls == [
+            (["git", "-C", "/repo", "remote", "remove", "sandbox-feat-x"], False)
+        ]
 
 
 class TestSandboxRemote:

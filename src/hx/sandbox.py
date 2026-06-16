@@ -116,35 +116,34 @@ def clone_is_dirty(name: str, repo: str) -> bool:
     return bool(status.strip())
 
 
-def branch_exists(repo: str, branch: str) -> bool:
-    return succeeds(["git", "-C", repo, "rev-parse", "--verify", "--quiet", branch])
+def unpushed_commit_count(repo: str, name: str, branch: str, target: str) -> int:
+    """Commits in the sandbox's branch not yet on origin, or 0 when removal is safe.
 
-
-def unpushed_commit_count(repo: str, branch: str, base: str) -> int:
-    """Commits on `branch` not on `base`, or 0 when deletion is safe.
-
-    Safe means: the branch doesn't exist, or it has an upstream (its commits
-    live on the remote already).
+    Safe (0) means: nothing was fetched for this branch, or the sandbox tip is
+    already an ancestor of origin/<branch> (pushed via `hx mr`). Otherwise counts
+    commits the sandbox has beyond origin/<branch> (or origin/<target> if the branch
+    was never pushed). Call `fetch_sandbox` first so the ref is up to date.
     """
-    if not branch_exists(repo, branch):
+    ref = f"refs/sandboxes/{name}/{branch}"
+    if not succeeds(["git", "-C", repo, "rev-parse", "--verify", "--quiet", ref]):
         return 0
-    has_upstream = succeeds(
-        [
-            "git",
-            "-C",
-            repo,
-            "rev-parse",
-            "--abbrev-ref",
-            "--verify",
-            "--quiet",
-            f"{branch}@{{upstream}}",
-        ]
-    )
-    if has_upstream:
-        return 0
+    origin_branch = f"origin/{branch}"
+    if succeeds(["git", "-C", repo, "rev-parse", "--verify", "--quiet", origin_branch]):
+        if succeeds(
+            ["git", "-C", repo, "merge-base", "--is-ancestor", ref, origin_branch]
+        ):
+            return 0
+        base = origin_branch
+    else:
+        base = f"origin/{target}"
     return int(
-        capture(["git", "-C", repo, "rev-list", "--count", f"{base}..{branch}"]).strip()
+        capture(["git", "-C", repo, "rev-list", "--count", f"{base}..{ref}"]).strip()
     )
+
+
+def remove_sandbox_remote(repo: str, name: str) -> None:
+    """Drop the host-side sandbox-<name> remote (best effort; ignores absence)."""
+    run(["git", "-C", repo, "remote", "remove", sandbox_remote(name)], check=False)
 
 
 SANDBOX_CLAUDE_MD = """\
