@@ -81,15 +81,19 @@ def succeeds(command: list[str]) -> bool:
     return subprocess.run(command, capture_output=True).returncode == 0
 
 
-def mr_push_command(worktree: Path, target: str) -> list[str]:
+def mr_push_command(repo: str, name: str, branch: str, target: str) -> list[str]:
+    """Push the sandbox's fetched branch ref straight to origin and open an MR.
+
+    The branch lives only in refs/sandboxes/<name>/<branch> on the host (fetched
+    from the sandbox); pushing the ref directly avoids creating a host branch.
+    """
     return [
         "git",
         "-C",
-        str(worktree),
+        repo,
         "push",
-        "-u",
         "origin",
-        "HEAD",
+        f"refs/sandboxes/{name}/{branch}:refs/heads/{branch}",
         "-o",
         "merge_request.create",
         "-o",
@@ -97,6 +101,19 @@ def mr_push_command(worktree: Path, target: str) -> list[str]:
         "-o",
         "merge_request.remove_source_branch",
     ]
+
+
+def fetch_sandbox(repo: str, name: str, check: bool = True) -> None:
+    """Fetch the sandbox's commits into refs/sandboxes/<name>/* on the host."""
+    run(["git", "-C", repo, "fetch", sandbox_remote(name)], check=check)
+
+
+def clone_is_dirty(name: str, repo: str) -> bool:
+    """True when the in-container clone has uncommitted changes (forgotten commit)."""
+    status = capture(
+        ["sbx", "exec", name, "--", "git", "-C", repo, "status", "--porcelain"]
+    )
+    return bool(status.strip())
 
 
 def branch_exists(repo: str, branch: str) -> bool:

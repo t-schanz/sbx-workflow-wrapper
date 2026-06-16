@@ -1,5 +1,3 @@
-from pathlib import Path
-
 import pytest
 
 from hx import HxError
@@ -18,16 +16,15 @@ class TestSanitizeName:
 
 
 class TestMrPushCommand:
-    def test_builds_exact_push_command(self):
-        command = sandbox.mr_push_command(Path("/wt"), "main")
+    def test_pushes_sandbox_ref_to_origin_with_mr_options(self):
+        command = sandbox.mr_push_command("/repo", "feat-x", "feat/x", "main")
         assert command == [
             "git",
             "-C",
-            "/wt",
+            "/repo",
             "push",
-            "-u",
             "origin",
-            "HEAD",
+            "refs/sandboxes/feat-x/feat/x:refs/heads/feat/x",
             "-o",
             "merge_request.create",
             "-o",
@@ -37,8 +34,39 @@ class TestMrPushCommand:
         ]
 
     def test_custom_target(self):
-        command = sandbox.mr_push_command(Path("/wt"), "develop")
+        command = sandbox.mr_push_command("/repo", "feat-x", "feat/x", "develop")
         assert "merge_request.target=develop" in command
+
+
+class TestCloneIsDirty:
+    def test_dirty_when_status_has_output(self, monkeypatch):
+        monkeypatch.setattr(sandbox, "capture", lambda command: " M ai/foo.py\n")
+        assert sandbox.clone_is_dirty("feat-x", "/repo") is True
+
+    def test_clean_when_status_is_empty(self, monkeypatch):
+        monkeypatch.setattr(sandbox, "capture", lambda command: "")
+        assert sandbox.clone_is_dirty("feat-x", "/repo") is False
+
+    def test_queries_status_inside_the_clone(self, monkeypatch):
+        seen = {}
+
+        def capture(command):
+            seen["command"] = command
+            return ""
+
+        monkeypatch.setattr(sandbox, "capture", capture)
+        sandbox.clone_is_dirty("feat-x", "/repo")
+        assert seen["command"] == [
+            "sbx",
+            "exec",
+            "feat-x",
+            "--",
+            "git",
+            "-C",
+            "/repo",
+            "status",
+            "--porcelain",
+        ]
 
 
 class TestInstallPluginsCommand:
