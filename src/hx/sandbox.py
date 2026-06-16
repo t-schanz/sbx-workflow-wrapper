@@ -31,15 +31,17 @@ def branch_checkout_command(
     """Check the feature branch out inside the clone (cwd = the mirrored repo path).
 
     Bases on origin/<branch> when it already exists on the host (resume), else on
-    origin/<target>. `origin` in the clone is the read-only host source.
+    origin/<target>. `origin` in the clone is the read-only host source. The repo,
+    branch, and target are passed as positional args (not interpolated) so values
+    containing shell metacharacters (e.g. an apostrophe in a branch name) are safe.
     """
     script = (
-        f"cd '{repo}' && "
-        f"if git rev-parse --verify --quiet 'origin/{branch}' >/dev/null; "
-        f"then base='origin/{branch}'; else base='origin/{target}'; fi && "
-        f"git checkout -B '{branch}' \"$base\""
+        'cd "$1" && '
+        'if git rev-parse --verify --quiet "origin/$2" >/dev/null; '
+        'then base="origin/$2"; else base="origin/$3"; fi && '
+        'git checkout -B "$2" "$base"'
     )
-    return ["sbx", "exec", name, "--", "sh", "-c", script]
+    return ["sbx", "exec", name, "--", "sh", "-c", script, "sh", repo, branch, target]
 
 
 def copy_file_commands(name: str, repo: str, relative_path: str) -> list[list[str]]:

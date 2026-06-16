@@ -240,14 +240,33 @@ class TestMaterializeCloneCommand:
 
 
 class TestBranchCheckoutCommand:
-    def test_checks_out_branch_in_clone_basing_on_origin(self):
+    def test_passes_values_as_positional_args(self):
         command = sandbox.branch_checkout_command("feat-x", "/repo", "feat/x", "main")
-        assert command[:6] == ["sbx", "exec", "feat-x", "--", "sh", "-c"]
+        assert command == [
+            "sbx",
+            "exec",
+            "feat-x",
+            "--",
+            "sh",
+            "-c",
+            'cd "$1" && '
+            'if git rev-parse --verify --quiet "origin/$2" >/dev/null; '
+            'then base="origin/$2"; else base="origin/$3"; fi && '
+            'git checkout -B "$2" "$base"',
+            "sh",
+            "/repo",
+            "feat/x",
+            "main",
+        ]
+
+    def test_branch_with_apostrophe_is_not_interpolated_into_script(self):
+        command = sandbox.branch_checkout_command(
+            "feat-x", "/repo", "feat/o'brien", "main"
+        )
         script = command[6]
-        assert "cd '/repo'" in script
-        assert "origin/feat/x" in script
-        assert "origin/main" in script
-        assert "git checkout -B 'feat/x'" in script
+        # the branch value must NOT appear in the script body (passed as argv instead)
+        assert "o'brien" not in script
+        assert command[-2] == "feat/o'brien"
 
 
 class TestCopyFileCommands:
