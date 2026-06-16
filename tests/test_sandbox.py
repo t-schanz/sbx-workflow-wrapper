@@ -176,3 +176,46 @@ class TestUnpushedCommitCount:
     def test_no_upstream_with_commits(self, monkeypatch):
         _patch_git(monkeypatch, FakeGit(True, False, 3))
         assert sandbox.unpushed_commit_count("/repo", "feat/x", "main") == 3
+
+
+class TestSandboxRemote:
+    def test_prefixes_name(self):
+        assert sandbox.sandbox_remote("feat-x") == "sandbox-feat-x"
+
+
+class TestMaterializeCloneCommand:
+    def test_runs_claude_version_via_sbx_run(self):
+        assert sandbox.materialize_clone_command("feat-x") == [
+            "sbx",
+            "run",
+            "feat-x",
+            "--",
+            "--version",
+        ]
+
+
+class TestBranchCheckoutCommand:
+    def test_checks_out_branch_in_clone_basing_on_origin(self):
+        command = sandbox.branch_checkout_command("feat-x", "/repo", "feat/x", "main")
+        assert command[:6] == ["sbx", "exec", "feat-x", "--", "sh", "-c"]
+        script = command[6]
+        assert "cd '/repo'" in script
+        assert "origin/feat/x" in script
+        assert "origin/main" in script
+        assert "git checkout -B 'feat/x'" in script
+
+
+class TestCopyFileCommands:
+    def test_makes_parent_then_copies_into_clone(self):
+        commands = sandbox.copy_file_commands(
+            "feat-x", "/repo", "build/openapi/openapi.json"
+        )
+        assert commands == [
+            ["sbx", "exec", "feat-x", "--", "mkdir", "-p", "/repo/build/openapi"],
+            [
+                "sbx",
+                "cp",
+                "/repo/build/openapi/openapi.json",
+                "feat-x:/repo/build/openapi/openapi.json",
+            ],
+        ]

@@ -11,6 +11,51 @@ def sanitize_name(branch: str) -> str:
     return branch.replace("/", "-")
 
 
+def sandbox_remote(name: str) -> str:
+    """Host-side git remote sbx wires to the sandbox's in-container clone."""
+    return f"sandbox-{name}"
+
+
+def materialize_clone_command(name: str) -> list[str]:
+    """Cheaply create the in-container clone (claude prints its version, no API call).
+
+    The writable clone does not exist until the agent is launched once; this is the
+    cheapest launch that creates it and exits.
+    """
+    return ["sbx", "run", name, "--", "--version"]
+
+
+def branch_checkout_command(
+    name: str, repo: str, branch: str, target: str
+) -> list[str]:
+    """Check the feature branch out inside the clone (cwd = the mirrored repo path).
+
+    Bases on origin/<branch> when it already exists on the host (resume), else on
+    origin/<target>. `origin` in the clone is the read-only host source.
+    """
+    script = (
+        f"cd '{repo}' && "
+        f"if git rev-parse --verify --quiet 'origin/{branch}' >/dev/null; "
+        f"then base='origin/{branch}'; else base='origin/{target}'; fi && "
+        f"git checkout -B '{branch}' \"$base\""
+    )
+    return ["sbx", "exec", name, "--", "sh", "-c", script]
+
+
+def copy_file_commands(name: str, repo: str, relative_path: str) -> list[list[str]]:
+    """Copy a host file into the clone: create its parent dir, then `sbx cp` it in.
+
+    The clone mirrors the host repo path, so the destination is repo/relative_path
+    inside the sandbox. The parent may not exist in the clone (e.g. gitignored build
+    artifacts), so it is created first.
+    """
+    destination = Path(repo) / relative_path
+    return [
+        ["sbx", "exec", name, "--", "mkdir", "-p", str(destination.parent)],
+        ["sbx", "cp", str(destination), f"{name}:{destination}"],
+    ]
+
+
 def run(command: list[str], check: bool = True) -> None:
     """Run a command streaming its output to the terminal."""
     result = subprocess.run(command)
