@@ -17,63 +17,6 @@ class TestSanitizeName:
         assert sandbox.sanitize_name("main") == "main"
 
 
-PORCELAIN_TWO_WORKTREES = """\
-worktree /home/user/repo
-HEAD 1111111111111111111111111111111111111111
-branch refs/heads/main
-
-worktree /home/user/repo/.sbx/feat-x-worktrees/feat/x
-HEAD 2222222222222222222222222222222222222222
-branch refs/heads/feat/x
-"""
-
-PORCELAIN_WITH_DETACHED = """\
-worktree /home/user/repo
-HEAD 1111111111111111111111111111111111111111
-branch refs/heads/main
-
-worktree /home/user/repo/.sbx/detached
-HEAD 3333333333333333333333333333333333333333
-detached
-
-worktree /home/user/repo/.sbx/feat-y-worktrees/feat/y
-HEAD 4444444444444444444444444444444444444444
-branch refs/heads/feat/y
-"""
-
-
-class TestParseWorktrees:
-    def test_finds_matching_branch(self):
-        worktrees = sandbox.parse_worktrees(PORCELAIN_TWO_WORKTREES)
-        assert worktrees["feat/x"] == Path(
-            "/home/user/repo/.sbx/feat-x-worktrees/feat/x"
-        )
-
-    def test_branch_not_found(self):
-        worktrees = sandbox.parse_worktrees(PORCELAIN_TWO_WORKTREES)
-        assert "feat/missing" not in worktrees
-
-    def test_multiple_worktrees_all_parsed(self):
-        worktrees = sandbox.parse_worktrees(PORCELAIN_TWO_WORKTREES)
-        assert set(worktrees) == {"main", "feat/x"}
-
-    def test_detached_head_blocks_skipped(self):
-        worktrees = sandbox.parse_worktrees(PORCELAIN_WITH_DETACHED)
-        assert set(worktrees) == {"main", "feat/y"}
-
-
-class TestFindWorktree:
-    def test_returns_path_for_branch(self, monkeypatch):
-        monkeypatch.setattr(sandbox, "capture", lambda command: PORCELAIN_TWO_WORKTREES)
-        path = sandbox.find_worktree("/home/user/repo", "feat/x")
-        assert path == Path("/home/user/repo/.sbx/feat-x-worktrees/feat/x")
-
-    def test_raises_for_missing_branch(self, monkeypatch):
-        monkeypatch.setattr(sandbox, "capture", lambda command: PORCELAIN_TWO_WORKTREES)
-        with pytest.raises(HxError, match="feat/missing"):
-            sandbox.find_worktree("/home/user/repo", "feat/missing")
-
-
 class TestMrPushCommand:
     def test_builds_exact_push_command(self):
         command = sandbox.mr_push_command(Path("/wt"), "main")
@@ -161,6 +104,8 @@ class TestProvisionCommands:
         assert "exists" in script
         assert "Sandbox workflow" in sandbox.SANDBOX_CLAUDE_MD
         assert "hxmr <branch>" in sandbox.SANDBOX_CLAUDE_MD
+        assert "clone" in sandbox.SANDBOX_CLAUDE_MD
+        assert "worktree" not in sandbox.SANDBOX_CLAUDE_MD
 
     def test_ends_with_plugin_install(self):
         commands = sandbox.provision_commands("feat-x", "Jane Doe", "jane@example.com")
@@ -175,48 +120,6 @@ class TestProvisionCommands:
         script = merge_command[6]
         assert "settings.json" in script
         assert "update" in script
-
-
-class TestEnsureBranch:
-    def _record(self, monkeypatch, branch_exists, fetch_fails=False):
-        calls = []
-
-        def run(command, check=True):
-            calls.append(command)
-            if fetch_fails and "fetch" in command:
-                raise HxError("offline")
-
-        monkeypatch.setattr(sandbox, "run", run)
-        monkeypatch.setattr(sandbox, "succeeds", lambda command: branch_exists)
-        return calls
-
-    def test_existing_branch_is_left_alone(self, monkeypatch):
-        calls = self._record(monkeypatch, branch_exists=True)
-        sandbox.ensure_branch("/repo", "feat/x", "main")
-        assert calls == []
-
-    def test_missing_branch_is_created_from_origin_target(self, monkeypatch):
-        calls = self._record(monkeypatch, branch_exists=False)
-        sandbox.ensure_branch("/repo", "feat/x", "main")
-        assert calls == [
-            ["git", "-C", "/repo", "fetch", "origin", "main"],
-            ["git", "-C", "/repo", "branch", "feat/x", "origin/main"],
-        ]
-
-    def test_fetch_failure_falls_back_to_local_target(self, monkeypatch):
-        calls = self._record(monkeypatch, branch_exists=False, fetch_fails=True)
-        sandbox.ensure_branch("/repo", "feat/x", "main")
-        assert calls[-1] == ["git", "-C", "/repo", "branch", "feat/x", "main"]
-
-
-class TestWorktreeIsDirty:
-    def test_dirty_when_status_has_output(self, monkeypatch):
-        monkeypatch.setattr(sandbox, "capture", lambda command: " M ai/foo.py\n")
-        assert sandbox.worktree_is_dirty(Path("/wt")) is True
-
-    def test_clean_when_status_is_empty(self, monkeypatch):
-        monkeypatch.setattr(sandbox, "capture", lambda command: "")
-        assert sandbox.worktree_is_dirty(Path("/wt")) is False
 
 
 class TestGitIdentity:

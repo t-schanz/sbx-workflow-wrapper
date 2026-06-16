@@ -1,4 +1,4 @@
-"""Thin subprocess layer for sbx/git, worktree parsing, name sanitizing."""
+"""Thin subprocess layer for sbx/git, name sanitizing, clone/branch helpers."""
 
 import subprocess
 from pathlib import Path
@@ -36,36 +36,6 @@ def succeeds(command: list[str]) -> bool:
     return subprocess.run(command, capture_output=True).returncode == 0
 
 
-def parse_worktrees(porcelain: str) -> dict[str, Path]:
-    """Map branch name -> worktree path from `git worktree list --porcelain` output.
-
-    Detached-HEAD worktrees have no `branch` line and are skipped.
-    """
-    worktrees: dict[str, Path] = {}
-    current_path: Path | None = None
-    for line in porcelain.splitlines():
-        if line.startswith("worktree "):
-            current_path = Path(line.removeprefix("worktree "))
-        elif line.startswith("branch refs/heads/") and current_path is not None:
-            worktrees[line.removeprefix("branch refs/heads/")] = current_path
-    return worktrees
-
-
-def find_worktree(repo: str, branch: str) -> Path:
-    porcelain = capture(["git", "-C", repo, "worktree", "list", "--porcelain"])
-    worktrees = parse_worktrees(porcelain)
-    if branch not in worktrees:
-        raise HxError(
-            f"no worktree found for branch {branch} — did you run `hx create`?"
-        )
-    return worktrees[branch]
-
-
-def worktree_is_dirty(worktree: Path) -> bool:
-    """True when the worktree has uncommitted changes (forgotten `git commit`)."""
-    return bool(capture(["git", "-C", str(worktree), "status", "--porcelain"]).strip())
-
-
 def mr_push_command(worktree: Path, target: str) -> list[str]:
     return [
         "git",
@@ -86,24 +56,6 @@ def mr_push_command(worktree: Path, target: str) -> list[str]:
 
 def branch_exists(repo: str, branch: str) -> bool:
     return succeeds(["git", "-C", repo, "rev-parse", "--verify", "--quiet", branch])
-
-
-def ensure_branch(repo: str, branch: str, target: str) -> None:
-    """Create a missing branch at origin/<target>.
-
-    `git worktree add -b` (what `sbx create --branch` does) would fork from
-    whatever the main checkout happens to have checked out — basing explicitly
-    keeps feature branches off each other's commits. Existing branches are
-    reused as-is.
-    """
-    if branch_exists(repo, branch):
-        return
-    try:
-        run(["git", "-C", repo, "fetch", "origin", target])
-        base = f"origin/{target}"
-    except HxError:
-        base = target
-    run(["git", "-C", repo, "branch", branch, base])
 
 
 def unpushed_commit_count(repo: str, branch: str, base: str) -> int:
@@ -135,8 +87,8 @@ def unpushed_commit_count(repo: str, branch: str, base: str) -> int:
 
 SANDBOX_CLAUDE_MD = """\
 ## Sandbox workflow
-You run inside a Docker sandbox on a dedicated git worktree (branch = sandbox name).
-Work only inside this worktree, never in the main repo checkout next to it.
+You work inside a Docker sandbox on a private clone of the repository, checked
+out on a dedicated feature branch. Stay on that branch — do not switch or rename it.
 git commit works here. git push does NOT - the sandbox has no git credentials by design.
 To push and open a merge request, ask the user to run on the host: hxmr <branch>
 """
