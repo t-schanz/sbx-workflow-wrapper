@@ -127,14 +127,17 @@ def mr(
         ),
     ] = None,
 ) -> None:
-    """Push BRANCH from the host and auto-create a GitLab merge request."""
+    """Fetch the sandbox's commits and open a GitLab merge request from the host."""
     config = config_module.load_config()
-    worktree = sandbox.find_worktree(config.repo, branch)
-    if sandbox.worktree_is_dirty(worktree) and not typer.confirm(
-        f"worktree for {branch} has uncommitted changes — push anyway?"
+    name = sandbox.sanitize_name(branch)
+    if sandbox.clone_is_dirty(name, config.repo) and not typer.confirm(
+        f"clone for {branch} has uncommitted changes — push anyway?"
     ):
         raise HxError("aborted — commit the changes in the sandbox first")
-    sandbox.run(sandbox.mr_push_command(worktree, target or config.target))
+    sandbox.fetch_sandbox(config.repo, name)
+    sandbox.run(
+        sandbox.mr_push_command(config.repo, name, branch, target or config.target)
+    )
 
 
 @app.command()

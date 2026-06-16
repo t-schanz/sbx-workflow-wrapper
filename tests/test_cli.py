@@ -161,43 +161,45 @@ class TestCreate:
 
 class TestMr:
     @pytest.fixture(autouse=True)
-    def clean_worktree(self, monkeypatch):
-        monkeypatch.setattr(sandbox, "worktree_is_dirty", lambda worktree: False)
+    def clean_clone(self, monkeypatch):
+        monkeypatch.setattr(sandbox, "clone_is_dirty", lambda name, repo: False)
 
-    def test_pushes_with_default_target(self, repo, recorded_runs):
-        _, worktree = repo
+    def test_fetches_then_pushes_with_default_target(self, repo, recorded_runs):
+        repo_path = repo
         result = runner.invoke(cli.app, ["mr", "feat/x"])
         assert result.exit_code == 0
-        assert recorded_runs == [sandbox.mr_push_command(worktree, "main")]
+        assert recorded_runs == [
+            ["git", "-C", str(repo_path), "fetch", "sandbox-feat-x"],
+            sandbox.mr_push_command(str(repo_path), "feat-x", "feat/x", "main"),
+        ]
 
     def test_pushes_with_explicit_target(self, repo, recorded_runs):
-        _, worktree = repo
+        repo_path = repo
         result = runner.invoke(cli.app, ["mr", "feat/x", "develop"])
         assert result.exit_code == 0
-        assert recorded_runs == [sandbox.mr_push_command(worktree, "develop")]
+        assert recorded_runs[-1] == sandbox.mr_push_command(
+            str(repo_path), "feat-x", "feat/x", "develop"
+        )
 
-    def test_missing_worktree_is_an_error(self, repo, recorded_runs, monkeypatch):
-        monkeypatch.setattr(sandbox, "capture", lambda command: "")
-        result = runner.invoke(cli.app, ["mr", "feat/x"])
-        assert result.exit_code == 1
-
-    def test_dirty_worktree_prompts_and_declined_aborts(
+    def test_dirty_clone_prompts_and_declined_aborts(
         self, repo, recorded_runs, monkeypatch
     ):
-        monkeypatch.setattr(sandbox, "worktree_is_dirty", lambda worktree: True)
+        monkeypatch.setattr(sandbox, "clone_is_dirty", lambda name, repo: True)
         result = runner.invoke(cli.app, ["mr", "feat/x"], input="n\n")
         assert result.exit_code == 1
         assert "uncommitted changes" in result.output
         assert recorded_runs == []
 
-    def test_dirty_worktree_prompts_and_accepted_pushes(
+    def test_dirty_clone_prompts_and_accepted_pushes(
         self, repo, recorded_runs, monkeypatch
     ):
-        _, worktree = repo
-        monkeypatch.setattr(sandbox, "worktree_is_dirty", lambda worktree: True)
+        repo_path = repo
+        monkeypatch.setattr(sandbox, "clone_is_dirty", lambda name, repo: True)
         result = runner.invoke(cli.app, ["mr", "feat/x"], input="y\n")
         assert result.exit_code == 0
-        assert recorded_runs == [sandbox.mr_push_command(worktree, "main")]
+        assert recorded_runs[-1] == sandbox.mr_push_command(
+            str(repo_path), "feat-x", "feat/x", "main"
+        )
 
 
 class TestRm:
