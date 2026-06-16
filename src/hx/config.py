@@ -15,9 +15,9 @@ class Config(BaseModel):
     cpus: int = 4
     memory: str = "8g"
     target: str = "main"
-    # Repo-relative paths copied into a fresh worktree (e.g. cached build artifacts).
+    # Repo-relative paths copied into the in-container clone (e.g. cached build artifacts).
     copy_files: list[str] = []
-    # Shell command run inside the sandbox at the worktree root after create.
+    # Shell command run inside the sandbox at the clone root after create.
     post_create: str | None = None
 
 
