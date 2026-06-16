@@ -1,5 +1,3 @@
-from pathlib import Path
-
 import pytest
 
 from hx import HxError
@@ -17,74 +15,16 @@ class TestSanitizeName:
         assert sandbox.sanitize_name("main") == "main"
 
 
-PORCELAIN_TWO_WORKTREES = """\
-worktree /home/user/repo
-HEAD 1111111111111111111111111111111111111111
-branch refs/heads/main
-
-worktree /home/user/repo/.sbx/feat-x-worktrees/feat/x
-HEAD 2222222222222222222222222222222222222222
-branch refs/heads/feat/x
-"""
-
-PORCELAIN_WITH_DETACHED = """\
-worktree /home/user/repo
-HEAD 1111111111111111111111111111111111111111
-branch refs/heads/main
-
-worktree /home/user/repo/.sbx/detached
-HEAD 3333333333333333333333333333333333333333
-detached
-
-worktree /home/user/repo/.sbx/feat-y-worktrees/feat/y
-HEAD 4444444444444444444444444444444444444444
-branch refs/heads/feat/y
-"""
-
-
-class TestParseWorktrees:
-    def test_finds_matching_branch(self):
-        worktrees = sandbox.parse_worktrees(PORCELAIN_TWO_WORKTREES)
-        assert worktrees["feat/x"] == Path(
-            "/home/user/repo/.sbx/feat-x-worktrees/feat/x"
-        )
-
-    def test_branch_not_found(self):
-        worktrees = sandbox.parse_worktrees(PORCELAIN_TWO_WORKTREES)
-        assert "feat/missing" not in worktrees
-
-    def test_multiple_worktrees_all_parsed(self):
-        worktrees = sandbox.parse_worktrees(PORCELAIN_TWO_WORKTREES)
-        assert set(worktrees) == {"main", "feat/x"}
-
-    def test_detached_head_blocks_skipped(self):
-        worktrees = sandbox.parse_worktrees(PORCELAIN_WITH_DETACHED)
-        assert set(worktrees) == {"main", "feat/y"}
-
-
-class TestFindWorktree:
-    def test_returns_path_for_branch(self, monkeypatch):
-        monkeypatch.setattr(sandbox, "capture", lambda command: PORCELAIN_TWO_WORKTREES)
-        path = sandbox.find_worktree("/home/user/repo", "feat/x")
-        assert path == Path("/home/user/repo/.sbx/feat-x-worktrees/feat/x")
-
-    def test_raises_for_missing_branch(self, monkeypatch):
-        monkeypatch.setattr(sandbox, "capture", lambda command: PORCELAIN_TWO_WORKTREES)
-        with pytest.raises(HxError, match="feat/missing"):
-            sandbox.find_worktree("/home/user/repo", "feat/missing")
-
-
 class TestMrPushCommand:
-    def test_builds_exact_push_command(self):
-        command = sandbox.mr_push_command(Path("/wt"), "main")
+    def test_pushes_sandbox_ref_to_origin_with_mr_options(self):
+        command = sandbox.mr_push_command("/repo", "feat-x", "feat/x", "main")
         assert command == [
             "git",
             "-C",
-            "/wt",
+            "/repo",
             "push",
-            "-u",
             "origin",
-            "HEAD",
+            "refs/sandboxes/feat-x/feat/x:refs/heads/feat/x",
             "-o",
             "merge_request.create",
             "-o",
@@ -94,8 +34,39 @@ class TestMrPushCommand:
         ]
 
     def test_custom_target(self):
-        command = sandbox.mr_push_command(Path("/wt"), "develop")
+        command = sandbox.mr_push_command("/repo", "feat-x", "feat/x", "develop")
         assert "merge_request.target=develop" in command
+
+
+class TestCloneIsDirty:
+    def test_dirty_when_status_has_output(self, monkeypatch):
+        monkeypatch.setattr(sandbox, "capture", lambda command: " M ai/foo.py\n")
+        assert sandbox.clone_is_dirty("feat-x", "/repo") is True
+
+    def test_clean_when_status_is_empty(self, monkeypatch):
+        monkeypatch.setattr(sandbox, "capture", lambda command: "")
+        assert sandbox.clone_is_dirty("feat-x", "/repo") is False
+
+    def test_queries_status_inside_the_clone(self, monkeypatch):
+        seen = {}
+
+        def capture(command):
+            seen["command"] = command
+            return ""
+
+        monkeypatch.setattr(sandbox, "capture", capture)
+        sandbox.clone_is_dirty("feat-x", "/repo")
+        assert seen["command"] == [
+            "sbx",
+            "exec",
+            "feat-x",
+            "--",
+            "git",
+            "-C",
+            "/repo",
+            "status",
+            "--porcelain",
+        ]
 
 
 class TestInstallPluginsCommand:
@@ -161,6 +132,8 @@ class TestProvisionCommands:
         assert "exists" in script
         assert "Sandbox workflow" in sandbox.SANDBOX_CLAUDE_MD
         assert "hxmr <branch>" in sandbox.SANDBOX_CLAUDE_MD
+        assert "clone" in sandbox.SANDBOX_CLAUDE_MD
+        assert "worktree" not in sandbox.SANDBOX_CLAUDE_MD
 
     def test_ends_with_plugin_install(self):
         commands = sandbox.provision_commands("feat-x", "Jane Doe", "jane@example.com")
@@ -177,48 +150,6 @@ class TestProvisionCommands:
         assert "update" in script
 
 
-class TestEnsureBranch:
-    def _record(self, monkeypatch, branch_exists, fetch_fails=False):
-        calls = []
-
-        def run(command, check=True):
-            calls.append(command)
-            if fetch_fails and "fetch" in command:
-                raise HxError("offline")
-
-        monkeypatch.setattr(sandbox, "run", run)
-        monkeypatch.setattr(sandbox, "succeeds", lambda command: branch_exists)
-        return calls
-
-    def test_existing_branch_is_left_alone(self, monkeypatch):
-        calls = self._record(monkeypatch, branch_exists=True)
-        sandbox.ensure_branch("/repo", "feat/x", "main")
-        assert calls == []
-
-    def test_missing_branch_is_created_from_origin_target(self, monkeypatch):
-        calls = self._record(monkeypatch, branch_exists=False)
-        sandbox.ensure_branch("/repo", "feat/x", "main")
-        assert calls == [
-            ["git", "-C", "/repo", "fetch", "origin", "main"],
-            ["git", "-C", "/repo", "branch", "feat/x", "origin/main"],
-        ]
-
-    def test_fetch_failure_falls_back_to_local_target(self, monkeypatch):
-        calls = self._record(monkeypatch, branch_exists=False, fetch_fails=True)
-        sandbox.ensure_branch("/repo", "feat/x", "main")
-        assert calls[-1] == ["git", "-C", "/repo", "branch", "feat/x", "main"]
-
-
-class TestWorktreeIsDirty:
-    def test_dirty_when_status_has_output(self, monkeypatch):
-        monkeypatch.setattr(sandbox, "capture", lambda command: " M ai/foo.py\n")
-        assert sandbox.worktree_is_dirty(Path("/wt")) is True
-
-    def test_clean_when_status_is_empty(self, monkeypatch):
-        monkeypatch.setattr(sandbox, "capture", lambda command: "")
-        assert sandbox.worktree_is_dirty(Path("/wt")) is False
-
-
 class TestGitIdentity:
     def test_reads_host_git_config(self, monkeypatch):
         values = {"user.name": "Jane Doe\n", "user.email": "jane@example.com\n"}
@@ -232,23 +163,27 @@ class TestGitIdentity:
 
 
 class FakeGit:
-    """Simulates the three git queries the rm guard makes."""
+    """Simulates the git ref queries the rm guard makes against the sandbox ref."""
 
-    def __init__(self, branch_exists, has_upstream, unpushed_count):
-        self.branch_exists = branch_exists
-        self.has_upstream = has_upstream
-        self.unpushed_count = unpushed_count
+    def __init__(self, sandbox_ref_exists, origin_branch_exists, is_ancestor, count):
+        self.sandbox_ref_exists = sandbox_ref_exists
+        self.origin_branch_exists = origin_branch_exists
+        self.is_ancestor = is_ancestor
+        self.count = count
 
     def capture(self, command):
         if "rev-list" in command:
-            return f"{self.unpushed_count}\n"
+            return f"{self.count}\n"
         raise AssertionError(f"unexpected capture: {command}")
 
     def succeeds(self, command):
-        if "@{upstream}" in command[-1]:
-            return self.has_upstream
-        if "--verify" in command:
-            return self.branch_exists
+        if "merge-base" in command:
+            return self.is_ancestor
+        target = command[-1]
+        if target.startswith("refs/sandboxes/"):
+            return self.sandbox_ref_exists
+        if target.startswith("origin/"):
+            return self.origin_branch_exists
         raise AssertionError(f"unexpected probe: {command}")
 
 
@@ -258,18 +193,93 @@ def _patch_git(monkeypatch, fake):
 
 
 class TestUnpushedCommitCount:
-    def test_branch_missing_is_safe(self, monkeypatch):
-        _patch_git(monkeypatch, FakeGit(False, False, 5))
-        assert sandbox.unpushed_commit_count("/repo", "feat/x", "main") == 0
+    def test_no_fetched_ref_is_safe(self, monkeypatch):
+        _patch_git(monkeypatch, FakeGit(False, False, False, 5))
+        assert sandbox.unpushed_commit_count("/repo", "feat-x", "feat/x", "main") == 0
 
-    def test_branch_with_upstream_is_safe(self, monkeypatch):
-        _patch_git(monkeypatch, FakeGit(True, True, 5))
-        assert sandbox.unpushed_commit_count("/repo", "feat/x", "main") == 0
+    def test_already_pushed_branch_is_safe(self, monkeypatch):
+        # origin/<branch> exists and the sandbox tip is an ancestor of it
+        _patch_git(monkeypatch, FakeGit(True, True, True, 5))
+        assert sandbox.unpushed_commit_count("/repo", "feat-x", "feat/x", "main") == 0
 
-    def test_no_upstream_zero_commits(self, monkeypatch):
-        _patch_git(monkeypatch, FakeGit(True, False, 0))
-        assert sandbox.unpushed_commit_count("/repo", "feat/x", "main") == 0
+    def test_origin_branch_ahead_counts_against_origin_branch(self, monkeypatch):
+        _patch_git(monkeypatch, FakeGit(True, True, False, 2))
+        assert sandbox.unpushed_commit_count("/repo", "feat-x", "feat/x", "main") == 2
 
-    def test_no_upstream_with_commits(self, monkeypatch):
-        _patch_git(monkeypatch, FakeGit(True, False, 3))
-        assert sandbox.unpushed_commit_count("/repo", "feat/x", "main") == 3
+    def test_no_origin_branch_counts_against_target(self, monkeypatch):
+        _patch_git(monkeypatch, FakeGit(True, False, False, 4))
+        assert sandbox.unpushed_commit_count("/repo", "feat-x", "feat/x", "main") == 4
+
+
+class TestRemoveSandboxRemote:
+    def test_removes_remote_best_effort(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            sandbox, "run", lambda command, check=True: calls.append((command, check))
+        )
+        sandbox.remove_sandbox_remote("/repo", "feat-x")
+        assert calls == [
+            (["git", "-C", "/repo", "remote", "remove", "sandbox-feat-x"], False)
+        ]
+
+
+class TestSandboxRemote:
+    def test_prefixes_name(self):
+        assert sandbox.sandbox_remote("feat-x") == "sandbox-feat-x"
+
+
+class TestMaterializeCloneCommand:
+    def test_runs_claude_version_via_sbx_run(self):
+        assert sandbox.materialize_clone_command("feat-x") == [
+            "sbx",
+            "run",
+            "feat-x",
+            "--",
+            "--version",
+        ]
+
+
+class TestBranchCheckoutCommand:
+    def test_passes_values_as_positional_args(self):
+        command = sandbox.branch_checkout_command("feat-x", "/repo", "feat/x", "main")
+        assert command == [
+            "sbx",
+            "exec",
+            "feat-x",
+            "--",
+            "sh",
+            "-c",
+            'cd "$1" && '
+            'if git rev-parse --verify --quiet "origin/$2" >/dev/null; '
+            'then base="origin/$2"; else base="origin/$3"; fi && '
+            'git checkout -B "$2" "$base"',
+            "sh",
+            "/repo",
+            "feat/x",
+            "main",
+        ]
+
+    def test_branch_with_apostrophe_is_not_interpolated_into_script(self):
+        command = sandbox.branch_checkout_command(
+            "feat-x", "/repo", "feat/o'brien", "main"
+        )
+        script = command[6]
+        # the branch value must NOT appear in the script body (passed as argv instead)
+        assert "o'brien" not in script
+        assert command[-2] == "feat/o'brien"
+
+
+class TestCopyFileCommands:
+    def test_makes_parent_then_copies_into_clone(self):
+        commands = sandbox.copy_file_commands(
+            "feat-x", "/repo", "build/openapi/openapi.json"
+        )
+        assert commands == [
+            ["sbx", "exec", "feat-x", "--", "mkdir", "-p", "/repo/build/openapi"],
+            [
+                "sbx",
+                "cp",
+                "/repo/build/openapi/openapi.json",
+                "feat-x:/repo/build/openapi/openapi.json",
+            ],
+        ]

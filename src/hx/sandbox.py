@@ -1,4 +1,4 @@
-"""Thin subprocess layer for sbx/git, worktree parsing, name sanitizing."""
+"""Thin subprocess layer for sbx/git, name sanitizing, clone/branch helpers."""
 
 import subprocess
 from pathlib import Path
@@ -9,6 +9,53 @@ from hx import HxError
 def sanitize_name(branch: str) -> str:
     """Sandbox names must not contain '/'."""
     return branch.replace("/", "-")
+
+
+def sandbox_remote(name: str) -> str:
+    """Host-side git remote sbx wires to the sandbox's in-container clone."""
+    return f"sandbox-{name}"
+
+
+def materialize_clone_command(name: str) -> list[str]:
+    """Cheaply create the in-container clone (claude prints its version, no API call).
+
+    The writable clone does not exist until the agent is launched once; this is the
+    cheapest launch that creates it and exits.
+    """
+    return ["sbx", "run", name, "--", "--version"]
+
+
+def branch_checkout_command(
+    name: str, repo: str, branch: str, target: str
+) -> list[str]:
+    """Check the feature branch out inside the clone (cwd = the mirrored repo path).
+
+    Bases on origin/<branch> when it already exists on the host (resume), else on
+    origin/<target>. `origin` in the clone is the read-only host source. The repo,
+    branch, and target are passed as positional args (not interpolated) so values
+    containing shell metacharacters (e.g. an apostrophe in a branch name) are safe.
+    """
+    script = (
+        'cd "$1" && '
+        'if git rev-parse --verify --quiet "origin/$2" >/dev/null; '
+        'then base="origin/$2"; else base="origin/$3"; fi && '
+        'git checkout -B "$2" "$base"'
+    )
+    return ["sbx", "exec", name, "--", "sh", "-c", script, "sh", repo, branch, target]
+
+
+def copy_file_commands(name: str, repo: str, relative_path: str) -> list[list[str]]:
+    """Copy a host file into the clone: create its parent dir, then `sbx cp` it in.
+
+    The clone mirrors the host repo path, so the destination is repo/relative_path
+    inside the sandbox. The parent may not exist in the clone (e.g. gitignored build
+    artifacts), so it is created first.
+    """
+    destination = Path(repo) / relative_path
+    return [
+        ["sbx", "exec", name, "--", "mkdir", "-p", str(destination.parent)],
+        ["sbx", "cp", str(destination), f"{name}:{destination}"],
+    ]
 
 
 def run(command: list[str], check: bool = True) -> None:
@@ -36,45 +83,19 @@ def succeeds(command: list[str]) -> bool:
     return subprocess.run(command, capture_output=True).returncode == 0
 
 
-def parse_worktrees(porcelain: str) -> dict[str, Path]:
-    """Map branch name -> worktree path from `git worktree list --porcelain` output.
+def mr_push_command(repo: str, name: str, branch: str, target: str) -> list[str]:
+    """Push the sandbox's fetched branch ref straight to origin and open an MR.
 
-    Detached-HEAD worktrees have no `branch` line and are skipped.
+    The branch lives only in refs/sandboxes/<name>/<branch> on the host (fetched
+    from the sandbox); pushing the ref directly avoids creating a host branch.
     """
-    worktrees: dict[str, Path] = {}
-    current_path: Path | None = None
-    for line in porcelain.splitlines():
-        if line.startswith("worktree "):
-            current_path = Path(line.removeprefix("worktree "))
-        elif line.startswith("branch refs/heads/") and current_path is not None:
-            worktrees[line.removeprefix("branch refs/heads/")] = current_path
-    return worktrees
-
-
-def find_worktree(repo: str, branch: str) -> Path:
-    porcelain = capture(["git", "-C", repo, "worktree", "list", "--porcelain"])
-    worktrees = parse_worktrees(porcelain)
-    if branch not in worktrees:
-        raise HxError(
-            f"no worktree found for branch {branch} — did you run `hx create`?"
-        )
-    return worktrees[branch]
-
-
-def worktree_is_dirty(worktree: Path) -> bool:
-    """True when the worktree has uncommitted changes (forgotten `git commit`)."""
-    return bool(capture(["git", "-C", str(worktree), "status", "--porcelain"]).strip())
-
-
-def mr_push_command(worktree: Path, target: str) -> list[str]:
     return [
         "git",
         "-C",
-        str(worktree),
+        repo,
         "push",
-        "-u",
         "origin",
-        "HEAD",
+        f"refs/sandboxes/{name}/{branch}:refs/heads/{branch}",
         "-o",
         "merge_request.create",
         "-o",
@@ -84,59 +105,53 @@ def mr_push_command(worktree: Path, target: str) -> list[str]:
     ]
 
 
-def branch_exists(repo: str, branch: str) -> bool:
-    return succeeds(["git", "-C", repo, "rev-parse", "--verify", "--quiet", branch])
+def fetch_sandbox(repo: str, name: str, check: bool = True) -> None:
+    """Fetch the sandbox's commits into refs/sandboxes/<name>/* on the host."""
+    run(["git", "-C", repo, "fetch", sandbox_remote(name)], check=check)
 
 
-def ensure_branch(repo: str, branch: str, target: str) -> None:
-    """Create a missing branch at origin/<target>.
+def clone_is_dirty(name: str, repo: str) -> bool:
+    """True when the in-container clone has uncommitted changes (forgotten commit)."""
+    status = capture(
+        ["sbx", "exec", name, "--", "git", "-C", repo, "status", "--porcelain"]
+    )
+    return bool(status.strip())
 
-    `git worktree add -b` (what `sbx create --branch` does) would fork from
-    whatever the main checkout happens to have checked out — basing explicitly
-    keeps feature branches off each other's commits. Existing branches are
-    reused as-is.
+
+def unpushed_commit_count(repo: str, name: str, branch: str, target: str) -> int:
+    """Commits in the sandbox's branch not yet on origin, or 0 when removal is safe.
+
+    Safe (0) means: nothing was fetched for this branch, or the sandbox tip is
+    already an ancestor of origin/<branch> (pushed via `hx mr`). Otherwise counts
+    commits the sandbox has beyond origin/<branch> (or origin/<target> if the branch
+    was never pushed). Call `fetch_sandbox` first so the ref is up to date.
     """
-    if branch_exists(repo, branch):
-        return
-    try:
-        run(["git", "-C", repo, "fetch", "origin", target])
+    ref = f"refs/sandboxes/{name}/{branch}"
+    if not succeeds(["git", "-C", repo, "rev-parse", "--verify", "--quiet", ref]):
+        return 0
+    origin_branch = f"origin/{branch}"
+    if succeeds(["git", "-C", repo, "rev-parse", "--verify", "--quiet", origin_branch]):
+        if succeeds(
+            ["git", "-C", repo, "merge-base", "--is-ancestor", ref, origin_branch]
+        ):
+            return 0
+        base = origin_branch
+    else:
         base = f"origin/{target}"
-    except HxError:
-        base = target
-    run(["git", "-C", repo, "branch", branch, base])
-
-
-def unpushed_commit_count(repo: str, branch: str, base: str) -> int:
-    """Commits on `branch` not on `base`, or 0 when deletion is safe.
-
-    Safe means: the branch doesn't exist, or it has an upstream (its commits
-    live on the remote already).
-    """
-    if not branch_exists(repo, branch):
-        return 0
-    has_upstream = succeeds(
-        [
-            "git",
-            "-C",
-            repo,
-            "rev-parse",
-            "--abbrev-ref",
-            "--verify",
-            "--quiet",
-            f"{branch}@{{upstream}}",
-        ]
-    )
-    if has_upstream:
-        return 0
     return int(
-        capture(["git", "-C", repo, "rev-list", "--count", f"{base}..{branch}"]).strip()
+        capture(["git", "-C", repo, "rev-list", "--count", f"{base}..{ref}"]).strip()
     )
+
+
+def remove_sandbox_remote(repo: str, name: str) -> None:
+    """Drop the host-side sandbox-<name> remote (best effort; ignores absence)."""
+    run(["git", "-C", repo, "remote", "remove", sandbox_remote(name)], check=False)
 
 
 SANDBOX_CLAUDE_MD = """\
 ## Sandbox workflow
-You run inside a Docker sandbox on a dedicated git worktree (branch = sandbox name).
-Work only inside this worktree, never in the main repo checkout next to it.
+You work inside a Docker sandbox on a private clone of the repository, checked
+out on a dedicated feature branch. Stay on that branch — do not switch or rename it.
 git commit works here. git push does NOT - the sandbox has no git credentials by design.
 To push and open a merge request, ask the user to run on the host: hxmr <branch>
 """

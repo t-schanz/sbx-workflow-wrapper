@@ -1,11 +1,13 @@
 # hx — sandbox workflow CLI
 
 `hx` manages a per-feature development workflow using
-[Docker Sandboxes (`sbx`)](https://docs.docker.com/ai/sandboxes/): one sandbox plus one
-git worktree per feature branch. Each sandbox runs Claude Code on a dedicated worktree
-of your repo. The sandbox deliberately has **no git credentials** — `git commit` works
-inside, `git push` does not. Pushing (and creating the GitLab merge request) happens on
-the host via `hx mr`.
+[Docker Sandboxes (`sbx`)](https://docs.docker.com/ai/sandboxes/): one sandbox per
+feature branch, each running Claude Code on a **private in-container clone** of your
+repo (`sbx --clone`). The host repo is mounted read-only; the agent commits inside the
+clone. The sandbox deliberately has **no git credentials** — `git commit` works inside,
+`git push` does not. Pushing (and creating the GitLab merge request) happens on the host
+via `hx mr`, which fetches the sandbox's commits through the `sandbox-<name>` git remote
+that `sbx` wires up.
 
 ## Install
 
@@ -36,10 +38,9 @@ target = "main"   # default MR target / base for the unpushed-commit check in `h
 
 ### Which repo does hx operate on?
 
-hx resolves the **main repository checkout containing your cwd** — running from inside
-any worktree of a repo (including the `.sbx/...` worktrees hx creates) resolves to the
-main checkout, since they share a common git dir. Only outside any git repository does
-the top-level `repo` key apply as a fallback.
+hx resolves the **main repository checkout containing your cwd** — if your cwd is inside
+a git repository, that repo's root is used. Only outside any git repository does the
+top-level `repo` key apply as a fallback.
 
 ### Project-specific workflows
 
@@ -48,16 +49,17 @@ the top-level defaults when the path matches the resolved repo. Any key can be
 overridden per project; two optional keys hook into `hx create`, so per-project setup
 lives in config, not code:
 
-- **`copy_files`** — repo-relative paths copied from the main checkout into a fresh
-  worktree (parent directories are created, missing files skipped silently). Use it to
-  prime caches or build artifacts that are expensive to regenerate.
-- **`post_create`** — a shell command run *inside the sandbox* after creation, via a
-  throwaway `sh -c` starting at the worktree root (a `cd` inside it needs no undoing).
-  If it fails, `hx create` warns and still attaches so you can finish setup manually.
-  For anything beyond a one-liner, point it at a script in your repo.
+- **`copy_files`** — repo-relative paths copied from the host checkout into the
+  in-container clone via `sbx cp` (parent directories are created, missing files
+  skipped silently). Use it to prime caches or build artifacts that are expensive to
+  regenerate.
+- **`post_create`** — a shell command run *inside the sandbox* after the clone is
+  created, via a throwaway `sh -c` starting at the clone root. If it fails, `hx create`
+  warns and still attaches so you can finish setup manually. For anything beyond a
+  one-liner, point it at a script in your repo.
 
 Worked example — a monorepo whose Python SDK in `ai/` is generated from an OpenAPI
-spec that a slow gradle run produces. Copying the host's cached spec into the worktree
+spec that a slow gradle run produces. Copying the host's cached spec into the clone
 first lets `gen-sdk` skip gradle entirely:
 
 ```toml
@@ -73,12 +75,14 @@ defaults — no hooks run.
 
 ### `hx create BRANCH [EXTRA_SBX_FLAGS...]`
 
-Creates a sandbox and a git worktree for `BRANCH`. A branch that doesn't exist yet is
-created from `origin/<target>` (fetched first), so it never forks from whatever your
-main checkout happens to have checked out. Provisions the sandbox (git
-identity from the host, pre-commit, the superpowers claude plugin, workflow notes in
-the agent's CLAUDE.md), copies any configured `copy_files` into the worktree, runs the
-configured `post_create` command inside the sandbox, then attaches interactively.
+Creates a `--clone` sandbox for `BRANCH`. First refreshes `origin/<target>` on the host
+so the clone's base is current (the clone has no remote credentials of its own). Then
+creates the sandbox, provisions it (git identity from the host, pre-commit, the
+superpowers claude plugin, workflow notes in the agent's CLAUDE.md), materializes the
+in-container clone with a cheap launch, checks out `BRANCH` inside it (based on
+`origin/<target>`, or `origin/BRANCH` when resuming an existing branch), copies any
+configured `copy_files` into the clone, runs the configured `post_create` command, then
+attaches interactively.
 
 Provisioning deliberately happens via `sbx exec` after creation, **not** via an sbx
 kit: as of sbx 0.30, passing any `--kit` skips the Claude credential seeding (you'd
@@ -92,8 +96,9 @@ hx create feat/PROJ-123-shiny-thing -- --gpu   # extra flags pass through to sbx
 
 ### `hx mr BRANCH [TARGET]` (alias: `hxmr`)
 
-Pushes the branch from the host and auto-creates a GitLab merge request via push
-options. `TARGET` defaults to `main` (configurable).
+Fetches the sandbox's commits to the host (via the `sandbox-<name>` remote) and pushes
+`BRANCH` to `origin`, auto-creating a GitLab merge request via push options. Prompts if
+the clone still has uncommitted changes. `TARGET` defaults to `main` (configurable).
 
 ```sh
 hxmr feat/PROJ-123-shiny-thing
@@ -102,8 +107,9 @@ hxmr feat/PROJ-123-shiny-thing develop
 
 ### `hx rm BRANCH` (alias: `hxrm`)
 
-Removes the sandbox, its worktree, and the branch. If the branch has unpushed commits
-and no upstream, you are prompted before anything is deleted.
+Fetches the sandbox's commits first (mirrored into `refs/sandboxes/<name>/*`, which
+survive removal), then removes the sandbox and drops the host-side `sandbox-<name>`
+remote. If the branch has unpushed commits, you are prompted before anything is removed.
 
 ```sh
 hxrm feat/PROJ-123-shiny-thing

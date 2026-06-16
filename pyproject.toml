@@ -1,7 +1,7 @@
 [project]
 name = "hx"
 version = "0.1.0"
-description = "Sandbox workflow CLI: one Docker sandbox + git worktree per feature branch"
+description = "Sandbox workflow CLI: one Docker sandbox (sbx --clone) per feature branch"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

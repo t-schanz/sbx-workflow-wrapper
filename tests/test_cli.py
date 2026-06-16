@@ -10,22 +10,14 @@ runner = CliRunner()
 @pytest.fixture
 def repo(tmp_path, monkeypatch):
     repo_path = tmp_path / "repo"
-    worktree = tmp_path / "worktree"
-    worktree.mkdir()
     repo_path.mkdir()
     monkeypatch.setattr(
         config_module, "load_config", lambda: Config(repo=str(repo_path))
     )
-    porcelain = (
-        f"worktree {repo_path}\nHEAD 1111\nbranch refs/heads/main\n\n"
-        f"worktree {worktree}\nHEAD 2222\nbranch refs/heads/feat/x\n"
-    )
-    monkeypatch.setattr(sandbox, "capture", lambda command: porcelain)
     monkeypatch.setattr(
         sandbox, "git_identity", lambda: ("Jane Doe", "jane@example.com")
     )
-    monkeypatch.setattr(sandbox, "ensure_branch", lambda *args: None)
-    return repo_path, worktree
+    return repo_path
 
 
 def configure(monkeypatch, repo_path, **overrides):
@@ -46,15 +38,15 @@ def recorded_runs(monkeypatch):
 
 class TestCreate:
     def test_invokes_exact_commands(self, repo, recorded_runs):
-        repo_path, worktree = repo
+        repo_path = repo
         result = runner.invoke(cli.app, ["create", "feat/x", "--", "--gpu"])
         assert result.exit_code == 0
         assert recorded_runs == [
+            ["git", "-C", str(repo_path), "fetch", "origin", "main"],
             [
                 "sbx",
                 "create",
-                "--branch",
-                "feat/x",
+                "--clone",
                 "--name",
                 "feat-x",
                 "--cpus",
@@ -66,27 +58,42 @@ class TestCreate:
                 "--gpu",
             ],
             *sandbox.provision_commands("feat-x", "Jane Doe", "jane@example.com"),
+            sandbox.materialize_clone_command("feat-x"),
+            sandbox.branch_checkout_command("feat-x", str(repo_path), "feat/x", "main"),
             ["sbx", "run", "feat-x"],
         ]
 
-    def test_branch_is_based_on_target_before_sbx_create(self, repo, monkeypatch):
-        repo_path, _ = repo
-        events = []
-        monkeypatch.setattr(
-            sandbox, "ensure_branch", lambda *args: events.append(("ensure", args))
-        )
-        monkeypatch.setattr(
-            sandbox, "run", lambda command, check=True: events.append(("run", command))
-        )
+    def test_host_fetch_runs_before_sbx_create(self, repo, recorded_runs):
+        repo_path = repo
         result = runner.invoke(cli.app, ["create", "feat/x"])
         assert result.exit_code == 0
-        assert events[0] == ("ensure", (str(repo_path), "feat/x", "main"))
-        assert events[1][0] == "run"  # sbx create only after the branch is based
+        assert recorded_runs[0] == [
+            "git",
+            "-C",
+            str(repo_path),
+            "fetch",
+            "origin",
+            "main",
+        ]
+        assert recorded_runs[1][:3] == ["sbx", "create", "--clone"]
 
-    def test_post_create_runs_inside_sandbox_at_worktree(
-        self, repo, recorded_runs, monkeypatch
-    ):
-        repo_path, worktree = repo
+    def test_failed_host_fetch_warns_but_continues(self, repo, monkeypatch):
+        calls = []
+
+        def run(command, check=True):
+            calls.append(command)
+            if "fetch" in command and "origin" in command:
+                raise cli.HxError("offline")
+
+        monkeypatch.setattr(sandbox, "run", run)
+        result = runner.invoke(cli.app, ["create", "feat/x"])
+        assert result.exit_code == 0
+        assert "could not refresh" in result.output
+        assert any(c[:3] == ["sbx", "create", "--clone"] for c in calls)
+        assert calls[-1] == ["sbx", "run", "feat-x"]
+
+    def test_post_create_runs_inside_clone(self, repo, recorded_runs, monkeypatch):
+        repo_path = repo
         configure(monkeypatch, repo_path, post_create="make gen-sdk")
         result = runner.invoke(cli.app, ["create", "feat/x"])
         assert result.exit_code == 0
@@ -97,36 +104,52 @@ class TestCreate:
             "--",
             "sh",
             "-c",
-            f"cd '{worktree}' && make gen-sdk",
+            f"cd '{repo_path}' && make gen-sdk",
         ]
         assert recorded_runs[-1] == ["sbx", "run", "feat-x"]
 
-    def test_copy_files_primes_the_worktree(self, repo, recorded_runs, monkeypatch):
-        repo_path, worktree = repo
+    def test_copy_files_copied_into_clone(self, repo, recorded_runs, monkeypatch):
+        repo_path = repo
         configure(monkeypatch, repo_path, copy_files=["build/openapi/openapi.json"])
         source = repo_path / "build" / "openapi" / "openapi.json"
         source.parent.mkdir(parents=True)
         source.write_text('{"openapi": "3.1.0"}')
         result = runner.invoke(cli.app, ["create", "feat/x"])
         assert result.exit_code == 0
-        copied = worktree / "build" / "openapi" / "openapi.json"
-        assert copied.read_text() == '{"openapi": "3.1.0"}'
+        assert [
+            "sbx",
+            "exec",
+            "feat-x",
+            "--",
+            "mkdir",
+            "-p",
+            str(repo_path / "build" / "openapi"),
+        ] in recorded_runs
+        assert [
+            "sbx",
+            "cp",
+            str(repo_path / "build" / "openapi" / "openapi.json"),
+            f"feat-x:{repo_path / 'build' / 'openapi' / 'openapi.json'}",
+        ] in recorded_runs
 
     def test_missing_copy_files_are_skipped(self, repo, recorded_runs, monkeypatch):
-        repo_path, worktree = repo
+        repo_path = repo
         configure(monkeypatch, repo_path, copy_files=["does/not/exist.json"])
         result = runner.invoke(cli.app, ["create", "feat/x"])
         assert result.exit_code == 0
-        assert not (worktree / "does").exists()
+        for command in sandbox.copy_file_commands(
+            "feat-x", str(repo_path), "does/not/exist.json"
+        ):
+            assert command not in recorded_runs
 
     def test_post_create_failure_warns_but_continues(self, repo, monkeypatch):
-        repo_path, _ = repo
+        repo_path = repo
         configure(monkeypatch, repo_path, post_create="make gen-sdk")
         calls = []
 
         def run(command, check=True):
             calls.append(command)
-            if "make gen-sdk" in command[-1]:
+            if command[-1].endswith("make gen-sdk"):
                 raise cli.HxError("boom")
 
         monkeypatch.setattr(sandbox, "run", run)
@@ -135,79 +158,86 @@ class TestCreate:
         assert "post-create setup failed" in result.output
         assert calls[-1] == ["sbx", "run", "feat-x"]
 
-    def test_missing_worktree_is_an_error(self, repo, recorded_runs, monkeypatch):
-        monkeypatch.setattr(sandbox, "capture", lambda command: "")
-        result = runner.invoke(cli.app, ["create", "feat/x"])
-        assert result.exit_code == 1
-
 
 class TestMr:
     @pytest.fixture(autouse=True)
-    def clean_worktree(self, monkeypatch):
-        monkeypatch.setattr(sandbox, "worktree_is_dirty", lambda worktree: False)
+    def clean_clone(self, monkeypatch):
+        monkeypatch.setattr(sandbox, "clone_is_dirty", lambda name, repo: False)
 
-    def test_pushes_with_default_target(self, repo, recorded_runs):
-        _, worktree = repo
+    def test_fetches_then_pushes_with_default_target(self, repo, recorded_runs):
+        repo_path = repo
         result = runner.invoke(cli.app, ["mr", "feat/x"])
         assert result.exit_code == 0
-        assert recorded_runs == [sandbox.mr_push_command(worktree, "main")]
+        assert recorded_runs == [
+            ["git", "-C", str(repo_path), "fetch", "sandbox-feat-x"],
+            sandbox.mr_push_command(str(repo_path), "feat-x", "feat/x", "main"),
+        ]
 
     def test_pushes_with_explicit_target(self, repo, recorded_runs):
-        _, worktree = repo
+        repo_path = repo
         result = runner.invoke(cli.app, ["mr", "feat/x", "develop"])
         assert result.exit_code == 0
-        assert recorded_runs == [sandbox.mr_push_command(worktree, "develop")]
+        assert recorded_runs[-1] == sandbox.mr_push_command(
+            str(repo_path), "feat-x", "feat/x", "develop"
+        )
 
-    def test_missing_worktree_is_an_error(self, repo, recorded_runs, monkeypatch):
-        monkeypatch.setattr(sandbox, "capture", lambda command: "")
-        result = runner.invoke(cli.app, ["mr", "feat/x"])
-        assert result.exit_code == 1
-
-    def test_dirty_worktree_prompts_and_declined_aborts(
+    def test_dirty_clone_prompts_and_declined_aborts(
         self, repo, recorded_runs, monkeypatch
     ):
-        monkeypatch.setattr(sandbox, "worktree_is_dirty", lambda worktree: True)
+        monkeypatch.setattr(sandbox, "clone_is_dirty", lambda name, repo: True)
         result = runner.invoke(cli.app, ["mr", "feat/x"], input="n\n")
         assert result.exit_code == 1
         assert "uncommitted changes" in result.output
         assert recorded_runs == []
 
-    def test_dirty_worktree_prompts_and_accepted_pushes(
+    def test_dirty_clone_prompts_and_accepted_pushes(
         self, repo, recorded_runs, monkeypatch
     ):
-        _, worktree = repo
-        monkeypatch.setattr(sandbox, "worktree_is_dirty", lambda worktree: True)
+        repo_path = repo
+        monkeypatch.setattr(sandbox, "clone_is_dirty", lambda name, repo: True)
         result = runner.invoke(cli.app, ["mr", "feat/x"], input="y\n")
         assert result.exit_code == 0
-        assert recorded_runs == [sandbox.mr_push_command(worktree, "main")]
+        assert recorded_runs[-1] == sandbox.mr_push_command(
+            str(repo_path), "feat-x", "feat/x", "main"
+        )
 
 
 class TestRm:
     def test_safe_branch_removed_without_prompt(self, repo, recorded_runs, monkeypatch):
+        repo_path = repo
         monkeypatch.setattr(
-            sandbox, "unpushed_commit_count", lambda repo, branch, base: 0
+            sandbox, "unpushed_commit_count", lambda repo, name, branch, target: 0
         )
         result = runner.invoke(cli.app, ["rm", "feat/x"])
         assert result.exit_code == 0
-        assert recorded_runs == [["sbx", "rm", "--force", "feat-x"]]
+        assert recorded_runs == [
+            ["git", "-C", str(repo_path), "fetch", "sandbox-feat-x"],
+            ["sbx", "rm", "--force", "feat-x"],
+            ["git", "-C", str(repo_path), "remote", "remove", "sandbox-feat-x"],
+        ]
 
     def test_unpushed_commits_prompt_declined_aborts(
         self, repo, recorded_runs, monkeypatch
     ):
         monkeypatch.setattr(
-            sandbox, "unpushed_commit_count", lambda repo, branch, base: 3
+            sandbox, "unpushed_commit_count", lambda repo, name, branch, target: 3
         )
         result = runner.invoke(cli.app, ["rm", "feat/x"], input="n\n")
         assert result.exit_code == 1
-        assert recorded_runs == []
+        # the preserving fetch still ran, but nothing was removed
+        assert ["sbx", "rm", "--force", "feat-x"] not in recorded_runs
 
     def test_unpushed_commits_prompt_accepted_removes(
         self, repo, recorded_runs, monkeypatch
     ):
+        repo_path = repo
         monkeypatch.setattr(
-            sandbox, "unpushed_commit_count", lambda repo, branch, base: 3
+            sandbox, "unpushed_commit_count", lambda repo, name, branch, target: 3
         )
         result = runner.invoke(cli.app, ["rm", "feat/x"], input="y\n")
         assert result.exit_code == 0
         assert "3 unpushed commit(s)" in result.output
-        assert recorded_runs == [["sbx", "rm", "--force", "feat-x"]]
+        assert recorded_runs[-2:] == [
+            ["sbx", "rm", "--force", "feat-x"],
+            ["git", "-C", str(repo_path), "remote", "remove", "sandbox-feat-x"],
+        ]

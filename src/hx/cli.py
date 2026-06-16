@@ -1,7 +1,6 @@
 """Typer app with create/mr/rm/setup plus the hxmr/hxrm alias entry points."""
 
 import functools
-import shutil
 from pathlib import Path
 from typing import Annotated
 
@@ -12,7 +11,7 @@ from hx import config as config_module
 from hx import sandbox, setup_cmd
 
 app = typer.Typer(
-    help="Sandbox workflow: one Docker sandbox + git worktree per feature branch.",
+    help="Sandbox workflow: one Docker sandbox (sbx --clone) per feature branch.",
     no_args_is_help=True,
 )
 
@@ -41,21 +40,27 @@ def create(
         str, typer.Argument(help="Feature branch to create the sandbox for.")
     ],
 ) -> None:
-    """Create a sandbox + worktree for BRANCH, run the configured setup, then attach.
+    """Create a --clone sandbox for BRANCH, run the configured setup, then attach.
 
     Extra flags after BRANCH are passed through verbatim to `sbx create`.
     """
     config = config_module.load_config()
     name = sandbox.sanitize_name(branch)
     git_user_name, git_user_email = sandbox.git_identity()
-    sandbox.ensure_branch(config.repo, branch, config.target)
+
+    # Keep the clone's base branch fresh; the clone itself has no remote creds.
+    try:
+        sandbox.run(["git", "-C", config.repo, "fetch", "origin", config.target])
+    except HxError:
+        typer.echo(
+            f"could not refresh origin/{config.target} — basing the clone on local refs"
+        )
 
     sandbox.run(
         [
             "sbx",
             "create",
-            "--branch",
-            branch,
+            "--clone",
             "--name",
             name,
             "--cpus",
@@ -77,14 +82,19 @@ def create(
         except HxError as error:
             typer.echo(f"provisioning step failed (continuing): {error}")
 
-    worktree = sandbox.find_worktree(config.repo, branch)
+    # The clone must exist before the steps below can touch it; unlike provisioning,
+    # a failure here is fatal (handle_errors turns it into a clean exit 1).
+    typer.echo("materializing the in-container clone...")
+    sandbox.run(sandbox.materialize_clone_command(name))
+    sandbox.run(
+        sandbox.branch_checkout_command(name, config.repo, branch, config.target)
+    )
 
     for relative_path in config.copy_files:
         source = Path(config.repo) / relative_path
         if source.exists():
-            destination = worktree / relative_path
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy(source, destination)
+            for command in sandbox.copy_file_commands(name, config.repo, relative_path):
+                sandbox.run(command)
 
     if config.post_create:
         typer.echo("running post-create setup inside the sandbox...")
@@ -97,7 +107,7 @@ def create(
                     "--",
                     "sh",
                     "-c",
-                    f"cd '{worktree}' && {config.post_create}",
+                    f"cd '{config.repo}' && {config.post_create}",
                 ]
             )
         except HxError:
@@ -117,14 +127,17 @@ def mr(
         ),
     ] = None,
 ) -> None:
-    """Push BRANCH from the host and auto-create a GitLab merge request."""
+    """Fetch the sandbox's commits and open a GitLab merge request from the host."""
     config = config_module.load_config()
-    worktree = sandbox.find_worktree(config.repo, branch)
-    if sandbox.worktree_is_dirty(worktree) and not typer.confirm(
-        f"worktree for {branch} has uncommitted changes — push anyway?"
+    name = sandbox.sanitize_name(branch)
+    if sandbox.clone_is_dirty(name, config.repo) and not typer.confirm(
+        f"clone for {branch} has uncommitted changes — push anyway?"
     ):
         raise HxError("aborted — commit the changes in the sandbox first")
-    sandbox.run(sandbox.mr_push_command(worktree, target or config.target))
+    sandbox.fetch_sandbox(config.repo, name)
+    sandbox.run(
+        sandbox.mr_push_command(config.repo, name, branch, target or config.target)
+    )
 
 
 @app.command()
@@ -134,14 +147,21 @@ def rm(
         str, typer.Argument(help="Feature branch whose sandbox to remove.")
     ],
 ) -> None:
-    """Remove the sandbox, its worktree, and the branch (prompts if work would be lost)."""
+    """Remove the sandbox and its host remote (prompts if unpushed work would be lost).
+
+    Fetches first so the commits are mirrored into refs/sandboxes/<name>/* (which
+    survive removal) before anything is deleted.
+    """
     config = config_module.load_config()
-    unpushed = sandbox.unpushed_commit_count(config.repo, branch, config.target)
+    name = sandbox.sanitize_name(branch)
+    sandbox.fetch_sandbox(config.repo, name, check=False)
+    unpushed = sandbox.unpushed_commit_count(config.repo, name, branch, config.target)
     if unpushed > 0 and not typer.confirm(
         f"branch {branch} has {unpushed} unpushed commit(s) — delete anyway?"
     ):
         raise HxError("aborted")
-    sandbox.run(["sbx", "rm", "--force", sandbox.sanitize_name(branch)])
+    sandbox.run(["sbx", "rm", "--force", name])
+    sandbox.remove_sandbox_remote(config.repo, name)
 
 
 @app.command()
