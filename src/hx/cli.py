@@ -30,21 +30,10 @@ def handle_errors(function):
     return wrapper
 
 
-@app.command(
-    context_settings={"allow_extra_args": True, "ignore_unknown_options": True}
-)
-@handle_errors
-def create(
-    context: typer.Context,
-    branch: Annotated[
-        str, typer.Argument(help="Feature branch to create the sandbox for.")
-    ],
-) -> None:
-    """Create a --clone sandbox for BRANCH, run the configured setup, then attach.
-
-    Extra flags after BRANCH are passed through verbatim to `sbx create`.
-    """
-    config = config_module.load_config()
+def prepare_sandbox(
+    config: config_module.Config, branch: str, extra_sbx_flags: list[str]
+) -> str:
+    """Create a --clone sandbox for BRANCH and run the full setup, without attaching."""
     name = sandbox.sanitize_name(branch)
     git_user_name, git_user_email = sandbox.git_identity()
 
@@ -67,9 +56,10 @@ def create(
             str(config.cpus),
             "--memory",
             config.memory,
+            *(["--template", config.template] if config.template else []),
             "claude",
             config.repo,
-            *context.args,
+            *extra_sbx_flags,
         ]
     )
 
@@ -81,6 +71,11 @@ def create(
             sandbox.run(provision_command)
         except HxError as error:
             typer.echo(f"provisioning step failed (continuing): {error}")
+
+    try:
+        sandbox.provision_mcp(name)
+    except (HxError, OSError, ValueError) as error:
+        typer.echo(f"MCP setup failed (continuing): {error}")
 
     # The clone must exist before the steps below can touch it; unlike provisioning,
     # a failure here is fatal (handle_errors turns it into a clean exit 1).
@@ -113,7 +108,59 @@ def create(
         except HxError:
             typer.echo("post-create setup failed — run it manually inside the sandbox")
 
-    sandbox.run(["sbx", "run", name], check=False)
+    return name
+
+
+@app.command(
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True}
+)
+@handle_errors
+def create(
+    context: typer.Context,
+    branch: Annotated[
+        str, typer.Argument(help="Feature branch to create the sandbox for.")
+    ],
+) -> None:
+    """Create a --clone sandbox for BRANCH, run the configured setup, then attach.
+
+    Extra flags after BRANCH are passed through verbatim to `sbx create`.
+    """
+    config = config_module.load_config()
+    name = prepare_sandbox(config, branch, list(context.args))
+    sandbox.run(["sbx", "run", "--name", name], check=False)
+
+
+@app.command()
+@handle_errors
+def work(
+    branch: Annotated[
+        str, typer.Argument(help="Feature branch to create the sandbox for.")
+    ],
+    prompt_file: Annotated[
+        Path,
+        typer.Argument(
+            exists=True,
+            dir_okay=False,
+            help="File whose contents are handed to the agent as its task.",
+        ),
+    ],
+) -> None:
+    """Provision a sandbox for BRANCH and let the agent work the prompt unattended.
+
+    The agent's tools are allow-listed first (see sandbox.allow_unattended_tools_command)
+    so nothing waits for an approval, and it commits
+    on BRANCH inside the clone. Nothing is merged or pushed: the commits are fetched to
+    the host afterwards, reachable via the sandbox-<name> remote and
+    refs/sandboxes/<name>/*, so a human opens the merge request with `hx mr BRANCH`.
+    """
+    config = config_module.load_config()
+    name = prepare_sandbox(config, branch, [])
+    sandbox.run(sandbox.allow_unattended_tools_command(name))
+    typer.echo(f"agent working on {branch} in sandbox {name}...")
+    try:
+        sandbox.run(sandbox.headless_agent_command(name, config.repo, prompt_file))
+    finally:
+        sandbox.fetch_sandbox(config.repo, name, check=False)
 
 
 @app.command()

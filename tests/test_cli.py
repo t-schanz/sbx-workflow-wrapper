@@ -37,6 +37,11 @@ def recorded_runs(monkeypatch):
 
 
 class TestCreate:
+    @pytest.fixture(autouse=True)
+    def stub_mcp(self, monkeypatch):
+        """Keep the host's real MCP config out of the command assertions."""
+        monkeypatch.setattr(sandbox, "provision_mcp", lambda name: None)
+
     def test_invokes_exact_commands(self, repo, recorded_runs):
         repo_path = repo
         result = runner.invoke(cli.app, ["create", "feat/x", "--", "--gpu"])
@@ -60,7 +65,7 @@ class TestCreate:
             *sandbox.provision_commands("feat-x", "Jane Doe", "jane@example.com"),
             sandbox.materialize_clone_command("feat-x"),
             sandbox.branch_checkout_command("feat-x", str(repo_path), "feat/x", "main"),
-            ["sbx", "run", "feat-x"],
+            ["sbx", "run", "--name", "feat-x"],
         ]
 
     def test_host_fetch_runs_before_sbx_create(self, repo, recorded_runs):
@@ -90,7 +95,7 @@ class TestCreate:
         assert result.exit_code == 0
         assert "could not refresh" in result.output
         assert any(c[:3] == ["sbx", "create", "--clone"] for c in calls)
-        assert calls[-1] == ["sbx", "run", "feat-x"]
+        assert calls[-1] == ["sbx", "run", "--name", "feat-x"]
 
     def test_post_create_runs_inside_clone(self, repo, recorded_runs, monkeypatch):
         repo_path = repo
@@ -106,7 +111,7 @@ class TestCreate:
             "-c",
             f"cd '{repo_path}' && make gen-sdk",
         ]
-        assert recorded_runs[-1] == ["sbx", "run", "feat-x"]
+        assert recorded_runs[-1] == ["sbx", "run", "--name", "feat-x"]
 
     def test_copy_files_copied_into_clone(self, repo, recorded_runs, monkeypatch):
         repo_path = repo
@@ -142,6 +147,45 @@ class TestCreate:
         ):
             assert command not in recorded_runs
 
+    def test_template_is_passed_to_sbx_create(self, repo, recorded_runs, monkeypatch):
+        configure(monkeypatch, repo, template="harpy-dev:1")
+        result = runner.invoke(cli.app, ["create", "feat/x"])
+        assert result.exit_code == 0
+        create_command = next(c for c in recorded_runs if c[:2] == ["sbx", "create"])
+        assert "--template" in create_command
+        assert create_command[create_command.index("--template") + 1] == "harpy-dev:1"
+        # the agent and workspace must stay the last positional args
+        assert create_command[-2:] == ["claude", str(repo)]
+
+    def test_no_template_flag_without_configured_template(self, repo, recorded_runs):
+        result = runner.invoke(cli.app, ["create", "feat/x"])
+        assert result.exit_code == 0
+        create_command = next(c for c in recorded_runs if c[:2] == ["sbx", "create"])
+        assert "--template" not in create_command
+
+    def test_mcp_provisioned_after_the_other_provisioning(
+        self, repo, recorded_runs, monkeypatch
+    ):
+        order = []
+        monkeypatch.setattr(
+            sandbox, "provision_mcp", lambda name: order.append(("mcp", name))
+        )
+        result = runner.invoke(cli.app, ["create", "feat/x"])
+        assert result.exit_code == 0
+        assert order == [("mcp", "feat-x")]
+        # provisioning precedes it, the clone is materialized after
+        assert recorded_runs[-3] == sandbox.materialize_clone_command("feat-x")
+
+    def test_mcp_failure_warns_but_continues(self, repo, recorded_runs, monkeypatch):
+        def boom(name):
+            raise cli.HxError("no token")
+
+        monkeypatch.setattr(sandbox, "provision_mcp", boom)
+        result = runner.invoke(cli.app, ["create", "feat/x"])
+        assert result.exit_code == 0
+        assert "MCP setup failed" in result.output
+        assert recorded_runs[-1] == ["sbx", "run", "--name", "feat-x"]
+
     def test_post_create_failure_warns_but_continues(self, repo, monkeypatch):
         repo_path = repo
         configure(monkeypatch, repo_path, post_create="make gen-sdk")
@@ -156,7 +200,73 @@ class TestCreate:
         result = runner.invoke(cli.app, ["create", "feat/x"])
         assert result.exit_code == 0
         assert "post-create setup failed" in result.output
-        assert calls[-1] == ["sbx", "run", "feat-x"]
+        assert calls[-1] == ["sbx", "run", "--name", "feat-x"]
+
+
+class TestWork:
+    @pytest.fixture(autouse=True)
+    def stub_mcp(self, monkeypatch):
+        monkeypatch.setattr(sandbox, "provision_mcp", lambda name: None)
+
+    @pytest.fixture
+    def prompt_file(self, tmp_path):
+        path = tmp_path / "ticket.md"
+        path.write_text("implement ticket 01")
+        return path
+
+    def test_provisions_then_runs_agent_then_fetches(
+        self, repo, recorded_runs, prompt_file
+    ):
+        repo_path = repo
+        result = runner.invoke(cli.app, ["work", "feat/x", str(prompt_file)])
+        assert result.exit_code == 0
+        assert recorded_runs[1][:5] == ["sbx", "create", "--clone", "--name", "feat-x"]
+        assert recorded_runs[-2] == sandbox.headless_agent_command(
+            "feat-x", str(repo_path), prompt_file
+        )
+        assert recorded_runs[-1] == [
+            "git",
+            "-C",
+            str(repo_path),
+            "fetch",
+            "sandbox-feat-x",
+        ]
+
+    def test_allows_the_tools_before_the_agent_starts(
+        self, repo, recorded_runs, prompt_file
+    ):
+        result = runner.invoke(cli.app, ["work", "feat/x", str(prompt_file)])
+        assert result.exit_code == 0
+        allow = sandbox.allow_unattended_tools_command("feat-x")
+        agent = sandbox.headless_agent_command("feat-x", str(repo), prompt_file)
+        assert recorded_runs.index(allow) < recorded_runs.index(agent)
+
+    def test_never_attaches_or_pushes(self, repo, recorded_runs, prompt_file):
+        runner.invoke(cli.app, ["work", "feat/x", str(prompt_file)])
+        launches = [
+            command for command in recorded_runs if command[:2] == ["sbx", "run"]
+        ]
+        assert launches == [sandbox.materialize_clone_command("feat-x")]
+        assert not any("push" in command for command in recorded_runs)
+
+    def test_fetches_even_when_the_agent_fails(self, repo, monkeypatch, prompt_file):
+        repo_path = repo
+        calls = []
+
+        def run(command, check=True):
+            calls.append(command)
+            if command[:2] == ["sbx", "exec"] and "claude -p" in " ".join(command):
+                raise cli.HxError("agent exited 1")
+
+        monkeypatch.setattr(sandbox, "run", run)
+        result = runner.invoke(cli.app, ["work", "feat/x", str(prompt_file)])
+        assert result.exit_code == 1
+        assert calls[-1] == ["git", "-C", str(repo_path), "fetch", "sandbox-feat-x"]
+
+    def test_missing_prompt_file_is_rejected(self, repo, recorded_runs):
+        result = runner.invoke(cli.app, ["work", "feat/x", "/nope/ticket.md"])
+        assert result.exit_code != 0
+        assert recorded_runs == []
 
 
 class TestMr:

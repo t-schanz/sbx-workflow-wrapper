@@ -1,6 +1,8 @@
 """Thin subprocess layer for sbx/git, name sanitizing, clone/branch helpers."""
 
+import json
 import subprocess
+import tempfile
 from pathlib import Path
 
 from hx import HxError
@@ -22,7 +24,7 @@ def materialize_clone_command(name: str) -> list[str]:
     The writable clone does not exist until the agent is launched once; this is the
     cheapest launch that creates it and exits.
     """
-    return ["sbx", "run", name, "--", "--version"]
+    return ["sbx", "run", "--name", name, "--", "--version"]
 
 
 def branch_checkout_command(
@@ -42,6 +44,29 @@ def branch_checkout_command(
         'git checkout -B "$2" "$base"'
     )
     return ["sbx", "exec", name, "--", "sh", "-c", script, "sh", repo, branch, target]
+
+
+def headless_agent_command(name: str, repo: str, prompt_file: Path) -> list[str]:
+    """Run the agent unattended on the prompt file, starting in the clone's repo root.
+
+    `acceptEdits` plus the allow rules from allow_unattended_tools_command are what makes
+    this work without a terminal to approve anything; see there for why bypass mode is
+    not used. Repo path and prompt travel as positional args so neither is interpreted
+    by the shell.
+    """
+    script = 'cd "$1" && claude -p "$2" --permission-mode acceptEdits'
+    return [
+        "sbx",
+        "exec",
+        name,
+        "--",
+        "sh",
+        "-c",
+        script,
+        "sh",
+        repo,
+        prompt_file.read_text(),
+    ]
 
 
 def copy_file_commands(name: str, repo: str, relative_path: str) -> list[list[str]]:
@@ -175,6 +200,55 @@ path.write_text(json.dumps(settings, indent=2) + "\\n")
 """
 
 
+UNATTENDED_TOOLS = (
+    "Read",
+    "Write",
+    "Edit",
+    "NotebookEdit",
+    "Bash",
+    "Glob",
+    "Grep",
+    "WebFetch",
+    "WebSearch",
+    "Task",
+    "TodoWrite",
+    "Skill",
+    "mcp__telecontext",
+)
+
+ALLOW_TOOLS_SCRIPT = """\
+import json, pathlib, sys
+
+path = pathlib.Path.home() / ".claude" / "settings.json"
+settings = json.loads(path.read_text()) if path.exists() else {}
+allow = settings.setdefault("permissions", {}).setdefault("allow", [])
+allow.extend(tool for tool in sys.argv[1:] if tool not in allow)
+path.write_text(json.dumps(settings, indent=2) + "\\n")
+"""
+
+
+def allow_unattended_tools_command(name: str) -> list[str]:
+    """Allow the tools an unattended agent needs, tool by tool.
+
+    Bypass mode is not an option: the organization's managed settings
+    (~/.claude/remote-settings.json) set `disableBypassPermissionsMode`, so both
+    `--permission-mode bypassPermissions` and `--dangerously-skip-permissions` leave the
+    agent waiting for an approval that nobody can give. Allow rules are the sanctioned
+    mechanism and, unlike bypass, they leave every managed deny rule (reading secrets,
+    sudo, rm -rf, force push) in force, because deny always wins over allow.
+    """
+    return [
+        "sbx",
+        "exec",
+        name,
+        "--",
+        "python3",
+        "-c",
+        ALLOW_TOOLS_SCRIPT,
+        *UNATTENDED_TOOLS,
+    ]
+
+
 def git_identity() -> tuple[str, str]:
     name = capture(["git", "config", "user.name"]).strip()
     email = capture(["git", "config", "user.email"]).strip()
@@ -186,18 +260,107 @@ def git_identity() -> tuple[str, str]:
     return name, email
 
 
+MARKETPLACES = ("anthropics/claude-plugins-official", "DietrichGebert/ponytail")
+
+PLUGINS = (
+    "superpowers@claude-plugins-official",
+    "mattpocock-skills@claude-plugins-official",
+    "ponytail@ponytail",
+)
+
+
 def install_plugins_command(name: str) -> list[str]:
+    """Add the marketplaces, then install the plugins the host session uses.
+
+    Runs after create, not at image build time: sbx rewrites
+    ~/.claude/settings.json when the sandbox is created, which would drop the
+    enabledPlugins entry an earlier install had written.
+    """
+    script = "; ".join(
+        [
+            *(
+                f"claude plugin marketplace add {marketplace} 2>/dev/null"
+                for marketplace in MARKETPLACES
+            ),
+            *(f"claude plugin install {plugin}" for plugin in PLUGINS),
+        ]
+    )
+    return ["sbx", "exec", name, "--", "sh", "-c", script]
+
+
+MERGE_JSON_SCRIPT = """\
+import json, pathlib, sys
+
+target, key, source = pathlib.Path(sys.argv[1]), sys.argv[2], pathlib.Path(sys.argv[3])
+data = json.loads(target.read_text()) if target.exists() else {}
+data.setdefault(key, {}).update(json.loads(source.read_text()))
+target.parent.mkdir(parents=True, exist_ok=True)
+target.write_text(json.dumps(data, indent=2) + "\\n")
+source.unlink()
+"""
+
+HOST_CLAUDE_CONFIG = Path.home() / ".claude.json"
+HOST_CLAUDE_CREDENTIALS = Path.home() / ".claude" / ".credentials.json"
+
+MCP_TARGETS = (
+    # (host file, key to copy, file inside the sandbox)
+    (HOST_CLAUDE_CONFIG, "mcpServers", "/home/agent/.claude.json"),
+    (HOST_CLAUDE_CREDENTIALS, "mcpOAuth", "/home/agent/.claude/.credentials.json"),
+)
+
+
+def host_json_key(path: Path, key: str) -> dict:
+    """Read one top-level object from a host JSON file, {} when absent."""
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text()).get(key) or {}
+
+
+def merge_json_commands(
+    name: str, payload: Path, key: str, target: str
+) -> list[list[str]]:
+    """Copy a JSON fragment into the sandbox and merge it under `key` in `target`.
+
+    The fragment travels as a file rather than an argv value because it can hold
+    OAuth tokens, which would otherwise show up in the process list. The merge
+    script deletes it once applied.
+    """
+    staged = f"/tmp/{payload.name}"
     return [
-        "sbx",
-        "exec",
-        name,
-        "--",
-        "sh",
-        "-c",
-        "claude plugin marketplace add anthropics/claude-plugins-official"
-        " 2>/dev/null;"
-        " claude plugin install superpowers@claude-plugins-official",
+        ["sbx", "cp", str(payload), f"{name}:{staged}"],
+        [
+            "sbx",
+            "exec",
+            name,
+            "--",
+            "python3",
+            "-c",
+            MERGE_JSON_SCRIPT,
+            target,
+            key,
+            staged,
+        ],
     ]
+
+
+def provision_mcp(name: str) -> None:
+    """Replicate the host's user-scope MCP servers and their OAuth tokens.
+
+    Sandboxes deliberately ignore user-level host config (~/.claude), so an
+    http/sse server configured on the host is invisible inside and its OAuth
+    login would have to be repeated per sandbox. Copying both halves keeps the
+    agent's tool set identical without a manual /mcp login.
+    """
+    with tempfile.TemporaryDirectory() as staging:
+        for index, (host_path, key, target) in enumerate(MCP_TARGETS):
+            fragment = host_json_key(host_path, key)
+            if not fragment:
+                continue
+            payload = Path(staging) / f"hx-mcp-{index}.json"
+            payload.write_text(json.dumps(fragment))
+            payload.chmod(0o600)
+            for command in merge_json_commands(name, payload, key, target):
+                run(command)
 
 
 def provision_commands(

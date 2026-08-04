@@ -15,6 +15,8 @@ class Config(BaseModel):
     cpus: int = 4
     memory: str = "8g"
     target: str = "main"
+    # Container image for the sandbox (sbx create --template), e.g. a baked toolchain.
+    template: str | None = None
     # Repo-relative paths copied into the in-container clone (e.g. cached build artifacts).
     copy_files: list[str] = []
     # Shell command run inside the sandbox at the clone root after create.

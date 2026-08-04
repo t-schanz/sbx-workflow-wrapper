@@ -1,3 +1,8 @@
+import json
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
 
 from hx import HxError
@@ -70,19 +75,181 @@ class TestCloneIsDirty:
 
 
 class TestInstallPluginsCommand:
-    def test_installs_superpowers_via_exec_after_create(self):
+    def test_runs_via_exec_after_create(self):
         command = sandbox.install_plugins_command("feat-x")
-        assert command == [
+        assert command[:6] == ["sbx", "exec", "feat-x", "--", "sh", "-c"]
+
+    def test_adds_every_marketplace_before_installing(self):
+        script = sandbox.install_plugins_command("feat-x")[6]
+        for marketplace in sandbox.MARKETPLACES:
+            assert f"marketplace add {marketplace} 2>/dev/null" in script
+        first_install = script.index("plugin install")
+        for marketplace in sandbox.MARKETPLACES:
+            assert script.index(f"marketplace add {marketplace}") < first_install
+
+    def test_installs_the_host_session_plugins(self):
+        script = sandbox.install_plugins_command("feat-x")[6]
+        for plugin in sandbox.PLUGINS:
+            assert f"claude plugin install {plugin}" in script
+
+    def test_covers_ponytail_and_mattpocock(self):
+        assert "ponytail@ponytail" in sandbox.PLUGINS
+        assert "mattpocock-skills@claude-plugins-official" in sandbox.PLUGINS
+        assert "DietrichGebert/ponytail" in sandbox.MARKETPLACES
+
+
+class TestHostJsonKey:
+    def test_reads_the_requested_key(self, tmp_path):
+        path = tmp_path / "config.json"
+        path.write_text('{"mcpServers": {"telecontext": {"type": "http"}}, "other": 1}')
+        assert sandbox.host_json_key(path, "mcpServers") == {
+            "telecontext": {"type": "http"}
+        }
+
+    def test_missing_file_is_empty(self, tmp_path):
+        assert sandbox.host_json_key(tmp_path / "absent.json", "mcpServers") == {}
+
+    def test_missing_key_is_empty(self, tmp_path):
+        path = tmp_path / "config.json"
+        path.write_text('{"other": 1}')
+        assert sandbox.host_json_key(path, "mcpServers") == {}
+
+    def test_null_key_is_empty(self, tmp_path):
+        path = tmp_path / "config.json"
+        path.write_text('{"mcpServers": null}')
+        assert sandbox.host_json_key(path, "mcpServers") == {}
+
+
+class TestMergeJsonCommands:
+    def test_copies_then_merges_under_the_key(self, tmp_path):
+        payload = tmp_path / "hx-mcp-0.json"
+        commands = sandbox.merge_json_commands(
+            "feat-x", payload, "mcpServers", "/home/agent/.claude.json"
+        )
+        assert commands[0] == ["sbx", "cp", str(payload), "feat-x:/tmp/hx-mcp-0.json"]
+        assert commands[1][:6] == [
             "sbx",
             "exec",
             "feat-x",
             "--",
-            "sh",
+            "python3",
             "-c",
-            "claude plugin marketplace add anthropics/claude-plugins-official"
-            " 2>/dev/null;"
-            " claude plugin install superpowers@claude-plugins-official",
         ]
+        assert commands[1][7:] == [
+            "/home/agent/.claude.json",
+            "mcpServers",
+            "/tmp/hx-mcp-0.json",
+        ]
+
+    def test_merge_script_updates_existing_keys_and_removes_the_payload(self, tmp_path):
+        target = tmp_path / "claude.json"
+        target.write_text('{"mcpServers": {"old": 1}, "keepMe": true}')
+        payload = tmp_path / "payload.json"
+        payload.write_text('{"telecontext": {"type": "http"}}')
+        subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                sandbox.MERGE_JSON_SCRIPT,
+                str(target),
+                "mcpServers",
+                str(payload),
+            ],
+            check=True,
+        )
+        merged = json.loads(target.read_text())
+        assert merged["mcpServers"] == {"old": 1, "telecontext": {"type": "http"}}
+        assert merged["keepMe"] is True
+        assert not payload.exists()
+
+    def test_merge_script_creates_a_missing_target(self, tmp_path):
+        target = tmp_path / "nested" / "credentials.json"
+        payload = tmp_path / "payload.json"
+        payload.write_text('{"telecontext|abc": {"accessToken": "t"}}')
+        subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                sandbox.MERGE_JSON_SCRIPT,
+                str(target),
+                "mcpOAuth",
+                str(payload),
+            ],
+            check=True,
+        )
+        assert json.loads(target.read_text()) == {
+            "mcpOAuth": {"telecontext|abc": {"accessToken": "t"}}
+        }
+
+
+class TestProvisionMcp:
+    def _stub_host(self, monkeypatch, tmp_path, servers, oauth):
+        config = tmp_path / "claude.json"
+        config.write_text(json.dumps({"mcpServers": servers}))
+        credentials = tmp_path / "credentials.json"
+        credentials.write_text(json.dumps({"mcpOAuth": oauth}))
+        monkeypatch.setattr(
+            sandbox,
+            "MCP_TARGETS",
+            (
+                (config, "mcpServers", "/home/agent/.claude.json"),
+                (credentials, "mcpOAuth", "/home/agent/.claude/.credentials.json"),
+            ),
+        )
+
+    def test_copies_servers_and_tokens_into_the_sandbox(self, monkeypatch, tmp_path):
+        self._stub_host(
+            monkeypatch,
+            tmp_path,
+            {"telecontext": {"type": "http"}},
+            {"telecontext|abc": {"accessToken": "t"}},
+        )
+        payloads = {}
+        calls = []
+
+        def run(command, check=True):
+            calls.append(command)
+            if command[1] == "cp":
+                payloads[command[2]] = Path(command[2]).read_text()
+
+        monkeypatch.setattr(sandbox, "run", run)
+        sandbox.provision_mcp("feat-x")
+
+        merges = [c for c in calls if c[1] == "exec"]
+        assert [c[8] for c in merges] == ["mcpServers", "mcpOAuth"]
+        assert [c[7] for c in merges] == [
+            "/home/agent/.claude.json",
+            "/home/agent/.claude/.credentials.json",
+        ]
+        assert json.loads(list(payloads.values())[0]) == {
+            "telecontext": {"type": "http"}
+        }
+
+    def test_empty_host_config_runs_nothing(self, monkeypatch, tmp_path):
+        self._stub_host(monkeypatch, tmp_path, {}, {})
+        calls = []
+        monkeypatch.setattr(
+            sandbox, "run", lambda command, check=True: calls.append(command)
+        )
+        sandbox.provision_mcp("feat-x")
+        assert calls == []
+
+    def test_staged_payload_is_not_world_readable(self, monkeypatch, tmp_path):
+        self._stub_host(
+            monkeypatch, tmp_path, {}, {"telecontext|abc": {"accessToken": "t"}}
+        )
+        modes = []
+        monkeypatch.setattr(
+            sandbox,
+            "run",
+            lambda command, check=True: (
+                modes.append(Path(command[2]).stat().st_mode)
+                if command[1] == "cp"
+                else None
+            ),
+        )
+        sandbox.provision_mcp("feat-x")
+        assert modes and all(mode & 0o077 == 0 for mode in modes)
 
 
 class TestProvisionCommands:
@@ -233,6 +400,7 @@ class TestMaterializeCloneCommand:
         assert sandbox.materialize_clone_command("feat-x") == [
             "sbx",
             "run",
+            "--name",
             "feat-x",
             "--",
             "--version",
@@ -267,6 +435,44 @@ class TestBranchCheckoutCommand:
         # the branch value must NOT appear in the script body (passed as argv instead)
         assert "o'brien" not in script
         assert command[-2] == "feat/o'brien"
+
+
+class TestAllowUnattendedToolsCommand:
+    def test_merges_an_allow_list_into_the_agent_settings(self, tmp_path, monkeypatch):
+        command = sandbox.allow_unattended_tools_command("feat-x")
+        assert command[:6] == ["sbx", "exec", "feat-x", "--", "python3", "-c"]
+        settings = tmp_path / ".claude" / "settings.json"
+        settings.parent.mkdir(parents=True)
+        settings.write_text(
+            '{"permissions": {"allow": ["Bash"], "deny": ["Read(**)"]}}'
+        )
+        monkeypatch.setenv("HOME", str(tmp_path))
+        subprocess.run(
+            [sys.executable, "-c", command[6], *command[7:]], check=True, cwd=tmp_path
+        )
+        written = json.loads(settings.read_text())["permissions"]
+        assert written["allow"].count("Bash") == 1
+        assert {"Write", "Edit", "Task"} <= set(written["allow"])
+        assert written["deny"] == ["Read(**)"]
+
+
+class TestHeadlessAgentCommand:
+    def test_starts_in_the_repo_without_bypassing_permissions(self, tmp_path):
+        prompt = tmp_path / "ticket.md"
+        prompt.write_text("do the thing")
+        command = sandbox.headless_agent_command("feat-x", "/repo", prompt)
+        assert command[:5] == ["sbx", "exec", "feat-x", "--", "sh"]
+        assert "--permission-mode acceptEdits" in command[6]
+        assert "bypass" not in command[6]
+        assert "dangerously" not in command[6]
+        assert command[-2:] == ["/repo", "do the thing"]
+
+    def test_prompt_is_never_interpolated_into_the_script(self, tmp_path):
+        prompt = tmp_path / "ticket.md"
+        prompt.write_text('$(rm -rf /) "; whoami')
+        command = sandbox.headless_agent_command("feat-x", "/repo", prompt)
+        assert "rm -rf" not in command[6]
+        assert command[-1] == '$(rm -rf /) "; whoami'
 
 
 class TestCopyFileCommands:
