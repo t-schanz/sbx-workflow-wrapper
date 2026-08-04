@@ -1,6 +1,7 @@
 """Thin subprocess layer for sbx/git, name sanitizing, clone/branch helpers."""
 
 import json
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -54,7 +55,10 @@ def headless_agent_command(name: str, repo: str, prompt_file: Path) -> list[str]
     not used. Repo path and prompt travel as positional args so neither is interpreted
     by the shell.
     """
-    script = 'cd "$1" && claude -p "$2" --permission-mode auto'
+    script = (
+        'cd "$1" && claude -p "$2" --permission-mode auto'
+        " --verbose --output-format stream-json"
+    )
     return [
         "sbx",
         "exec",
@@ -108,13 +112,21 @@ def succeeds(command: list[str]) -> bool:
     return subprocess.run(command, capture_output=True).returncode == 0
 
 
-def mr_push_command(repo: str, name: str, branch: str, target: str) -> list[str]:
+def mr_push_command(
+    repo: str,
+    name: str,
+    branch: str,
+    target: str,
+    title: str | None = None,
+    description: str | None = None,
+) -> list[str]:
     """Push the sandbox's fetched branch ref straight to origin and open an MR.
 
     The branch lives only in refs/sandboxes/<name>/<branch> on the host (fetched
     from the sandbox); pushing the ref directly avoids creating a host branch.
+    Without a title GitLab falls back to the branch name, which says nothing.
     """
-    return [
+    command = [
         "git",
         "-C",
         repo,
@@ -128,11 +140,81 @@ def mr_push_command(repo: str, name: str, branch: str, target: str) -> list[str]
         "-o",
         "merge_request.remove_source_branch",
     ]
+    if title:
+        command += ["-o", f"merge_request.title={title}"]
+    if description:
+        command += ["-o", f"merge_request.description={description}"]
+    return command
+
+
+JIRA_KEY = re.compile(r"[A-Z]+-\d+")
+
+MR_PROMPT = """\
+Write the title and description for a GitLab merge request from the commits below.
+
+Answer with the title on the first line, a blank line, then the description. Nothing
+else: no preamble, no markdown headings, no code fences.
+
+Write both the title and the description in GERMAN, even though the commits are English.
+Keep the conventional-commit type, the Jira key and any code identifiers as they are.
+
+Title format, exactly: <type>/{key}: <kurze Zusammenfassung>
+<type> is one of feat, fix, chore, docs, refactor, test — whichever the commits are.
+
+Description: two or three sentences on WHAT was done and why it matters. No file names,
+no implementation details, no bullet lists, no trailers, and never a Co-Authored-By or
+any mention of Claude or an AI.
+
+--- commits
+{commits}
+"""
+
+
+def mr_text(repo: str, name: str, branch: str, target: str) -> tuple[str, str]:
+    """Have the local agent write the MR title and description from the commits."""
+    key_match = JIRA_KEY.search(branch)
+    commits = capture(
+        [
+            "git",
+            "-C",
+            repo,
+            "log",
+            "--format=%B",
+            f"origin/{target}..refs/sandboxes/{name}/{branch}",
+        ]
+    )
+    prompt = MR_PROMPT.format(
+        key=key_match.group(0) if key_match else "DIGREM-XXXX", commits=commits.strip()
+    )
+    answer = capture(["claude", "-p", prompt]).strip()
+    if not answer:
+        raise HxError("the agent returned no merge request text — pass --title yourself")
+    title, _, description = answer.partition("\n")
+    return title.strip(), description.strip()
 
 
 def fetch_sandbox(repo: str, name: str, check: bool = True) -> None:
     """Fetch the sandbox's commits into refs/sandboxes/<name>/* on the host."""
     run(["git", "-C", repo, "fetch", sandbox_remote(name)], check=check)
+
+
+def sandbox_is_reachable(repo: str, name: str) -> bool:
+    """True when the sandbox's git daemon answers, i.e. the container is up."""
+    return succeeds(["git", "-C", repo, "ls-remote", sandbox_remote(name)])
+
+
+def sandbox_ref_exists(repo: str, name: str, branch: str) -> bool:
+    """True when the branch's commits were fetched to the host at some point."""
+    return succeeds(
+        [
+            "git",
+            "-C",
+            repo,
+            "rev-parse",
+            "--verify",
+            f"refs/sandboxes/{name}/{branch}",
+        ]
+    )
 
 
 def clone_is_dirty(name: str, repo: str) -> bool:
@@ -275,7 +357,6 @@ def git_identity() -> tuple[str, str]:
 MARKETPLACES = ("anthropics/claude-plugins-official", "DietrichGebert/ponytail")
 
 PLUGINS = (
-    "superpowers@claude-plugins-official",
     "mattpocock-skills@claude-plugins-official",
     "ponytail@ponytail",
 )

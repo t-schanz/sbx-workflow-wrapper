@@ -139,7 +139,7 @@ Sandboxes ignore user-level host config (`~/.claude`), so three things need help
 Creates a `--clone` sandbox for `BRANCH`. First refreshes `origin/<target>` on the host
 so the clone's base is current (the clone has no remote credentials of its own). Then
 creates the sandbox, provisions it (git identity from the host, pre-commit, the
-superpowers claude plugin, workflow notes in the agent's CLAUDE.md), materializes the
+claude plugins, workflow notes in the agent's CLAUDE.md), materializes the
 in-container clone with a cheap launch, checks out `BRANCH` inside it (based on
 `origin/<target>`, or `origin/BRANCH` when resuming an existing branch), copies any
 configured `copy_files` into the clone, runs the configured `post_create` command, then

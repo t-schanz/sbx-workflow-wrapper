@@ -42,6 +42,41 @@ class TestMrPushCommand:
         command = sandbox.mr_push_command("/repo", "feat-x", "feat/x", "develop")
         assert "merge_request.target=develop" in command
 
+    def test_title_and_description_travel_as_push_options(self):
+        command = sandbox.mr_push_command(
+            "/repo", "feat-x", "feat/x", "main", "feat/DIGREM-1: Thing", "Did the thing."
+        )
+        assert "merge_request.title=feat/DIGREM-1: Thing" in command
+        assert "merge_request.description=Did the thing." in command
+
+
+class TestMrText:
+    def test_asks_the_agent_with_the_branch_key_and_commits(self, monkeypatch):
+        calls = []
+
+        def fake_capture(command):
+            calls.append(command)
+            if command[0] == "git":
+                return "feat: add the thing\nREF: DIGREM-13686\n"
+            return "feat/DIGREM-13686: Add the thing\n\nThe thing is now there.\n"
+
+        monkeypatch.setattr(sandbox, "capture", fake_capture)
+        title, description = sandbox.mr_text(
+            "/repo", "DIGREM-13686-01-thing", "DIGREM-13686-01-thing", "main"
+        )
+        assert title == "feat/DIGREM-13686: Add the thing"
+        assert description == "The thing is now there."
+        prompt = calls[-1][2]
+        assert "<type>/DIGREM-13686: <kurze Zusammenfassung>" in prompt
+        assert "GERMAN" in prompt
+        assert "feat: add the thing" in prompt
+        assert "Co-Authored-By" in prompt
+
+    def test_empty_answer_is_an_error(self, monkeypatch):
+        monkeypatch.setattr(sandbox, "capture", lambda command: "")
+        with pytest.raises(HxError):
+            sandbox.mr_text("/repo", "feat-x", "feat/x", "main")
+
 
 class TestCloneIsDirty:
     def test_dirty_when_status_has_output(self, monkeypatch):
@@ -474,6 +509,7 @@ class TestHeadlessAgentCommand:
         command = sandbox.headless_agent_command("feat-x", "/repo", prompt)
         assert command[:5] == ["sbx", "exec", "feat-x", "--", "sh"]
         assert "--permission-mode auto" in command[6]
+        assert "--output-format stream-json" in command[6]
         assert "bypass" not in command[6]
         assert "dangerously" not in command[6]
         assert command[-2:] == ["/repo", "do the thing"]

@@ -284,6 +284,12 @@ class TestMr:
     @pytest.fixture(autouse=True)
     def clean_clone(self, monkeypatch):
         monkeypatch.setattr(sandbox, "clone_is_dirty", lambda name, repo: False)
+        monkeypatch.setattr(sandbox, "sandbox_is_reachable", lambda repo, name: True)
+        monkeypatch.setattr(
+            sandbox,
+            "mr_text",
+            lambda repo, name, branch, target: ("feat/DIGREM-1: Thing", "Did it."),
+        )
 
     def test_fetches_then_pushes_with_default_target(self, repo, recorded_runs):
         repo_path = repo
@@ -291,7 +297,14 @@ class TestMr:
         assert result.exit_code == 0
         assert recorded_runs == [
             ["git", "-C", str(repo_path), "fetch", "sandbox-feat-x"],
-            sandbox.mr_push_command(str(repo_path), "feat-x", "feat/x", "main"),
+            sandbox.mr_push_command(
+                str(repo_path),
+                "feat-x",
+                "feat/x",
+                "main",
+                "feat/DIGREM-1: Thing",
+                "Did it.",
+            ),
         ]
 
     def test_pushes_with_explicit_target(self, repo, recorded_runs):
@@ -299,8 +312,42 @@ class TestMr:
         result = runner.invoke(cli.app, ["mr", "feat/x", "develop"])
         assert result.exit_code == 0
         assert recorded_runs[-1] == sandbox.mr_push_command(
-            str(repo_path), "feat-x", "feat/x", "develop"
+            str(repo_path),
+            "feat-x",
+            "feat/x",
+            "develop",
+            "feat/DIGREM-1: Thing",
+            "Did it.",
         )
+
+    def test_dead_sandbox_still_pushes_the_fetched_ref(
+        self, repo, recorded_runs, monkeypatch
+    ):
+        monkeypatch.setattr(sandbox, "sandbox_is_reachable", lambda repo, name: False)
+        monkeypatch.setattr(
+            sandbox, "sandbox_ref_exists", lambda repo, name, branch: True
+        )
+        result = runner.invoke(cli.app, ["mr", "feat/x"])
+        assert result.exit_code == 0
+        assert "is gone" in result.output
+        assert ["git", "-C", str(repo), "fetch", "sandbox-feat-x"] not in recorded_runs
+        assert "merge_request.create" in recorded_runs[-1]
+
+    def test_dead_sandbox_without_fetched_ref_aborts(
+        self, repo, recorded_runs, monkeypatch
+    ):
+        monkeypatch.setattr(sandbox, "sandbox_is_reachable", lambda repo, name: False)
+        monkeypatch.setattr(
+            sandbox, "sandbox_ref_exists", lambda repo, name, branch: False
+        )
+        result = runner.invoke(cli.app, ["mr", "feat/x"])
+        assert result.exit_code == 1
+        assert recorded_runs == []
+
+    def test_draft_flag_prefixes_the_title(self, repo, recorded_runs):
+        result = runner.invoke(cli.app, ["mr", "feat/x", "--draft"])
+        assert result.exit_code == 0
+        assert "merge_request.title=Draft: feat/DIGREM-1: Thing" in recorded_runs[-1]
 
     def test_dirty_clone_prompts_and_declined_aborts(
         self, repo, recorded_runs, monkeypatch
@@ -319,7 +366,12 @@ class TestMr:
         result = runner.invoke(cli.app, ["mr", "feat/x"], input="y\n")
         assert result.exit_code == 0
         assert recorded_runs[-1] == sandbox.mr_push_command(
-            str(repo_path), "feat-x", "feat/x", "main"
+            str(repo_path),
+            "feat-x",
+            "feat/x",
+            "main",
+            "feat/DIGREM-1: Thing",
+            "Did it.",
         )
 
 

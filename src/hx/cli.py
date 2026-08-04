@@ -173,17 +173,33 @@ def mr(
             help="MR target branch (default: configured target, usually main)."
         ),
     ] = None,
+    draft: Annotated[
+        bool, typer.Option("--draft", help="Open the merge request as a draft.")
+    ] = False,
 ) -> None:
     """Fetch the sandbox's commits and open a GitLab merge request from the host."""
     config = config_module.load_config()
     name = sandbox.sanitize_name(branch)
-    if sandbox.clone_is_dirty(name, config.repo) and not typer.confirm(
-        f"clone for {branch} has uncommitted changes — push anyway?"
-    ):
-        raise HxError("aborted — commit the changes in the sandbox first")
-    sandbox.fetch_sandbox(config.repo, name)
+    if sandbox.sandbox_is_reachable(config.repo, name):
+        if sandbox.clone_is_dirty(name, config.repo) and not typer.confirm(
+            f"clone for {branch} has uncommitted changes — push anyway?"
+        ):
+            raise HxError("aborted — commit the changes in the sandbox first")
+        sandbox.fetch_sandbox(config.repo, name)
+    elif not sandbox.sandbox_ref_exists(config.repo, name, branch):
+        raise HxError(f"sandbox {name} is gone and no commits were fetched for {branch}")
+    else:
+        typer.echo(f"sandbox {name} is gone — pushing the commits fetched earlier")
+    mr_target = target or config.target
+    typer.echo("writing the merge request title and description...")
+    mr_title, mr_description = sandbox.mr_text(config.repo, name, branch, mr_target)
+    if draft:
+        mr_title = f"Draft: {mr_title}"
+    typer.echo(f"\n{mr_title}\n\n{mr_description}\n")
     sandbox.run(
-        sandbox.mr_push_command(config.repo, name, branch, target or config.target)
+        sandbox.mr_push_command(
+            config.repo, name, branch, mr_target, mr_title, mr_description
+        )
     )
 
 
