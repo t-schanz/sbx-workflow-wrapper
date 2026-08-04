@@ -49,12 +49,12 @@ def branch_checkout_command(
 def headless_agent_command(name: str, repo: str, prompt_file: Path) -> list[str]:
     """Run the agent unattended on the prompt file, starting in the clone's repo root.
 
-    `acceptEdits` plus the allow rules from allow_unattended_tools_command are what makes
-    this work without a terminal to approve anything; see there for why bypass mode is
+    `auto` lets the classifier judge the shell commands that
+    allow_unattended_tools_command did not pre-clear; see there for why bypass mode is
     not used. Repo path and prompt travel as positional args so neither is interpreted
     by the shell.
     """
-    script = 'cd "$1" && claude -p "$2" --permission-mode acceptEdits'
+    script = 'cd "$1" && claude -p "$2" --permission-mode auto'
     return [
         "sbx",
         "exec",
@@ -205,7 +205,6 @@ UNATTENDED_TOOLS = (
     "Write",
     "Edit",
     "NotebookEdit",
-    "Bash",
     "Glob",
     "Grep",
     "WebFetch",
@@ -214,6 +213,12 @@ UNATTENDED_TOOLS = (
     "TodoWrite",
     "Skill",
     "mcp__telecontext",
+    "Bash(git add:*)",
+    "Bash(git commit:*)",
+    "Bash(git status:*)",
+    "Bash(git diff:*)",
+    "Bash(git log:*)",
+    "Bash(git show:*)",
 )
 
 ALLOW_TOOLS_SCRIPT = """\
@@ -227,15 +232,21 @@ path.write_text(json.dumps(settings, indent=2) + "\\n")
 """
 
 
-def allow_unattended_tools_command(name: str) -> list[str]:
-    """Allow the tools an unattended agent needs, tool by tool.
+def allow_unattended_tools_command(
+    name: str, bash_patterns: tuple[str, ...] | list[str] = ()
+) -> list[str]:
+    """Pre-clear the tools an unattended agent needs, so nothing waits for a human.
 
     Bypass mode is not an option: the organization's managed settings
     (~/.claude/remote-settings.json) set `disableBypassPermissionsMode`, so both
     `--permission-mode bypassPermissions` and `--dangerously-skip-permissions` leave the
-    agent waiting for an approval that nobody can give. Allow rules are the sanctioned
-    mechanism and, unlike bypass, they leave every managed deny rule (reading secrets,
-    sudo, rm -rf, force push) in force, because deny always wins over allow.
+    agent waiting for an approval that nobody can give.
+
+    Pre-cleared are the file and search tools, whose damage a throwaway clone on its own
+    branch absorbs, plus the git commands the agent needs to commit and the project's own
+    build and test commands (`allow_bash`). Every other shell command is left to the
+    `auto` permission mode the agent runs in, and the managed deny rules (reading
+    secrets, sudo, rm -rf, force push) apply throughout, because deny wins over allow.
     """
     return [
         "sbx",
@@ -246,6 +257,7 @@ def allow_unattended_tools_command(name: str) -> list[str]:
         "-c",
         ALLOW_TOOLS_SCRIPT,
         *UNATTENDED_TOOLS,
+        *(f"Bash({pattern})" for pattern in bash_patterns),
     ]
 
 

@@ -21,6 +21,9 @@ class Config(BaseModel):
     copy_files: list[str] = []
     # Shell command run inside the sandbox at the clone root after create.
     post_create: str | None = None
+    # Command prefixes an unattended agent may run without the auto classifier deciding,
+    # e.g. ["./gradlew:*", "uv run:*"]. Everything else stays subject to it.
+    allow_bash: list[str] = []
 
 
 def config_path() -> Path:

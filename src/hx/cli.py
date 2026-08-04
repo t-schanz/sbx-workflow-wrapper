@@ -155,7 +155,7 @@ def work(
     """
     config = config_module.load_config()
     name = prepare_sandbox(config, branch, [])
-    sandbox.run(sandbox.allow_unattended_tools_command(name))
+    sandbox.run(sandbox.allow_unattended_tools_command(name, config.allow_bash))
     typer.echo(f"agent working on {branch} in sandbox {name}...")
     try:
         sandbox.run(sandbox.headless_agent_command(name, config.repo, prompt_file))

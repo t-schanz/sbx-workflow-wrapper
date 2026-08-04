@@ -455,6 +455,17 @@ class TestAllowUnattendedToolsCommand:
         assert {"Write", "Edit", "Task"} <= set(written["allow"])
         assert written["deny"] == ["Read(**)"]
 
+    def test_shell_is_not_cleared_wholesale(self):
+        command = sandbox.allow_unattended_tools_command("feat-x")
+        assert "Bash" not in command[7:]
+        assert "Bash(git commit:*)" in command[7:]
+
+    def test_project_commands_are_appended_as_bash_rules(self):
+        command = sandbox.allow_unattended_tools_command(
+            "feat-x", ["./gradlew:*", "uv run:*"]
+        )
+        assert command[-2:] == ["Bash(./gradlew:*)", "Bash(uv run:*)"]
+
 
 class TestHeadlessAgentCommand:
     def test_starts_in_the_repo_without_bypassing_permissions(self, tmp_path):
@@ -462,7 +473,7 @@ class TestHeadlessAgentCommand:
         prompt.write_text("do the thing")
         command = sandbox.headless_agent_command("feat-x", "/repo", prompt)
         assert command[:5] == ["sbx", "exec", "feat-x", "--", "sh"]
-        assert "--permission-mode acceptEdits" in command[6]
+        assert "--permission-mode auto" in command[6]
         assert "bypass" not in command[6]
         assert "dangerously" not in command[6]
         assert command[-2:] == ["/repo", "do the thing"]

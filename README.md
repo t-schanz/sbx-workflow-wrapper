@@ -59,6 +59,9 @@ lives in config, not code:
   one-liner, point it at a script in your repo.
 - **`template`** — container image for the sandbox (`sbx create --template`). Use it for
   toolchains the stock agent image gets wrong; see [Toolchains](#toolchains-via-a-template).
+- **`allow_bash`** — command prefixes (`"./gradlew:*"`) an unattended `hx work` agent may
+  run without the auto permission classifier deciding. Put the repo's build, test and lint
+  commands here so a run never stalls on its own test suite.
 
 Worked example — a monorepo whose Python SDK in `ai/` is generated from an OpenAPI
 spec that a slow gradle run produces. Copying the host's cached spec into the clone
@@ -167,10 +170,16 @@ hx work PROJ-123-01-schema ~/.local/state/hx-tickets/PROJ-123-01-schema.prompt
 organization that sets `disableBypassPermissionsMode` in `~/.claude/remote-settings.json`
 makes both `--permission-mode bypassPermissions` and `--dangerously-skip-permissions`
 refuse every write, and a headless agent then reports "waiting for permission" instead of
-working. `hx work` therefore writes an explicit `permissions.allow` list into the
-sandbox's settings (`sandbox.UNATTENDED_TOOLS`) and runs the agent with
-`--permission-mode acceptEdits`. Managed **deny** rules keep applying, since deny always
-wins over allow.
+working. `hx work` runs the agent in `--permission-mode auto` and pre-clears only what
+would otherwise stall it:
+
+- the file and search tools plus the git commands needed to commit
+  (`sandbox.UNATTENDED_TOOLS`) — a throwaway clone on its own branch, with no push
+  credentials, absorbs whatever they get wrong
+- the project's build and test commands, from the `allow_bash` config key
+
+Every other shell command is judged by the `auto` classifier, and managed **deny** rules
+apply throughout, since deny always wins over allow.
 
 ### `hx mr BRANCH [TARGET]` (alias: `hxmr`)
 

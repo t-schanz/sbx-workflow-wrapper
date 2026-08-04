@@ -241,6 +241,17 @@ class TestWork:
         agent = sandbox.headless_agent_command("feat-x", str(repo), prompt_file)
         assert recorded_runs.index(allow) < recorded_runs.index(agent)
 
+    def test_configured_project_commands_reach_the_allow_rules(
+        self, repo, recorded_runs, prompt_file, monkeypatch
+    ):
+        configure(monkeypatch, repo, allow_bash=["./gradlew:*"])
+        result = runner.invoke(cli.app, ["work", "feat/x", str(prompt_file)])
+        assert result.exit_code == 0
+        assert (
+            sandbox.allow_unattended_tools_command("feat-x", ["./gradlew:*"])
+            in recorded_runs
+        )
+
     def test_never_attaches_or_pushes(self, repo, recorded_runs, prompt_file):
         runner.invoke(cli.app, ["work", "feat/x", str(prompt_file)])
         launches = [
